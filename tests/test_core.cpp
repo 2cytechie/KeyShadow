@@ -112,6 +112,56 @@ void testJoystick() {
 }
 
 // ---------------------------------------------------------------------------
+void testWasdJoystick() {
+    ks::InputEngine engine;
+    engine.setScreenSize(1000, 1000);
+
+    std::vector<QByteArray> messages;
+    auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
+
+    ks::InputEvent down;
+    down.type = ks::InputEventType::Key;
+    down.vk = 'W';
+    down.down = true;
+    engine.handleInput(down);
+    for (int i = 0; i < 3; ++i) {
+        engine.tick(10, sink);
+    }
+
+    check(!messages.empty(), "WASD drives joystick through InputEngine");
+    if (!messages.empty()) {
+        check(read64(messages.front(), 2) == 0, "WASD uses joystick pointer id 0");
+        bool movedUp = false;
+        for (const QByteArray &message : messages) {
+            // 默认摇杆中心 y=760（1000px 高），W 应产生更小的 y。
+            if (static_cast<quint8>(message.at(1)) == 2 && read32(message, 14) < 760) {
+                movedUp = true;
+            }
+        }
+        check(movedUp, "W moves joystick upward");
+    }
+
+    messages.clear();
+    ks::InputEvent up = down;
+    up.down = false;
+    engine.handleInput(up);
+    for (int i = 0; i < 12; ++i) {
+        engine.tick(10, sink);
+    }
+    check(!messages.empty() && static_cast<quint8>(messages.back().at(1)) == 1,
+          "WASD release ends with UP");
+
+    messages.clear();
+    engine.handleInput(down);
+    engine.tick(10, sink);
+    messages.clear();
+    engine.releaseAll(sink);
+    check(!messages.empty() && static_cast<quint8>(messages.back().at(1)) == 1 &&
+              read64(messages.back(), 2) == 0,
+          "releaseAll lifts active joystick touch");
+}
+
+// ---------------------------------------------------------------------------
 void testLookEngine() {
     ks::LookEngine look;
     look.configure(QPointF(0.5, 0.5), 0.2, 1.0, 1000.0, 1000, 1000);
@@ -274,6 +324,7 @@ int main(int argc, char *argv[]) {
 
     testProtocol();
     testJoystick();
+    testWasdJoystick();
     testLookEngine();
     testKeymap();
     testSummonKeyFilter();

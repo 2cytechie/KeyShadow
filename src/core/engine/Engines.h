@@ -106,6 +106,8 @@ public:
     void setKeys(bool up, bool down, bool left, bool right);
     bool isActive() const { return m_active; }
     void reset();
+    /// 若触点仍按下则先发送抬触，再清除状态（模式切换/断线时使用）。
+    void release(const std::function<void(const QByteArray &)> &send);
 
     /// 返回 true 表示产生了事件（写入 send）。
     bool tick(int dtMs, const std::function<void(const QByteArray &)> &send);
@@ -139,6 +141,8 @@ class LookEngine {
 public:
     void addDelta(int dx, int dy, qint64 timestampNs);
     void reset();
+    /// 若视角触点仍按下则先发送抬触，再清除状态。
+    void release(const std::function<void(const QByteArray &)> &send);
     bool isActive() const { return m_active; }
 
     bool tick(int dtMs, const std::function<void(const QByteArray &)> &send);
@@ -272,6 +276,12 @@ private:
     qint64 m_lastInputQpc = 0;
     double m_latencyMs = -1.0;
     int m_ignoredKey = 0;
+
+    // WASD 摇杆按键状态（WASD 固定用于走位，不依赖键位方案）
+    bool m_joyUp = false;
+    bool m_joyDown = false;
+    bool m_joyLeft = false;
+    bool m_joyRight = false;
 };
 
 } // namespace ks

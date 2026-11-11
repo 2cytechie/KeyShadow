@@ -57,12 +57,16 @@ bool InjectionThread::start(quintptr controlSocket, int screenWidth, int screenH
 void InjectionThread::stop() {
     m_stopRequested.store(true);
     m_running.store(false);
+    if (m_socket) {
+        ::shutdown(static_cast<SOCKET>(m_socket), SD_BOTH);
+    }
     if (m_thread.joinable()) {
         m_thread.join();
     }
+    // 控制通道 socket 已由 ScrcpyClient::detachSockets 移交，停止后在此关闭避免句柄泄漏。
     if (m_socket) {
-        SOCKET s = static_cast<SOCKET>(m_socket);
-        ::shutdown(s, SD_BOTH);
+        ::closesocket(static_cast<SOCKET>(m_socket));
+        m_socket = 0;
     }
 }
 
@@ -97,7 +101,15 @@ void InjectionThread::releaseAll() {
     m_releaseRequested.fetch_add(1);
 }
 
-void InjectionThread::beginCalibration() { m_calibrationRequest.store(1); }
+void InjectionThread::beginCalibration() {
+    // 清理上一次测量遗留的结果，避免新一次测量拿到旧计数。
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_calibrationDone = false;
+        m_calibratedCounts = 0;
+    }
+    m_calibrationRequest.store(1);
+}
 
 void InjectionThread::endCalibration() { m_calibrationRequest.store(2); }
 

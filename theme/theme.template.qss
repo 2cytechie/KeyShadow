@@ -236,7 +236,7 @@ QToolButton:hover {
     background: @color-bg-hover;
 }
 
-QToolButton#WindowButton {
+QToolButton#WindowButton, QToolButton#WindowClose {
     min-width: 46px;
     min-height: 40px;
     border-radius: 0;
@@ -565,6 +565,16 @@ QScrollArea#InspectorScroll {
 QWidget#VideoSurface {
     background: @color-bg-app;
 }
+
+QLabel#DeviceCapsule {
+    background: @color-bg-elevated;
+    border-radius: 14px;
+    padding: 4px 12px;
+    color: @color-text-secondary;
+}
+
+QLabel#DeviceCapsule[state="success"] { color: @color-state-success; }
+QLabel#DeviceCapsule[state="danger"]  { color: @color-state-danger; }
 
 QLabel#StatusDot {
     min-width: 8px;

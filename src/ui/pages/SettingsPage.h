@@ -6,6 +6,7 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QPushButton;
+class QShowEvent;
 class QTimer;
 
 namespace ks {
@@ -27,6 +28,7 @@ signals:
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 
 private:
     QWidget *buildSection(const QString &title);

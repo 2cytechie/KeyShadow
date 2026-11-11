@@ -139,6 +139,7 @@ private:
     QComboBox *m_resolutionCombo = nullptr;
     QComboBox *m_fpsCombo = nullptr;
     QComboBox *m_bitrateCombo = nullptr;
+    QPushButton *m_toolbarFullscreenButton = nullptr;
 
     // 视频区
     VideoWidget *m_video = nullptr;

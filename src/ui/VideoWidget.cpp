@@ -143,6 +143,15 @@ void VideoWidget::setBypassEnhance(bool bypass) {
     update();
 }
 
+void VideoWidget::setFallbackAspect(double aspect) {
+    if (aspect <= 0.01 || hasFrame() || m_frameAspect == aspect) {
+        return;
+    }
+    m_frameAspect = aspect;
+    syncVideoRect();
+    update();
+}
+
 void VideoWidget::initializeGL() {
     initializeOpenGLFunctions();
     glClearColor(0.043f, 0.051f, 0.063f, 1.0f);

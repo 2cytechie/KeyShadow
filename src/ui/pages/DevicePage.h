@@ -27,6 +27,7 @@ public slots:
 
 private:
     void rebuildDeviceList();
+    void updateConnectAvailability();
 
     Session *m_session = nullptr;
     QListWidget *m_deviceList = nullptr;

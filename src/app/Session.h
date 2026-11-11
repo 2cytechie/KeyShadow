@@ -2,7 +2,9 @@
 
 #include <QObject>
 #include <QTimer>
+#include <atomic>
 #include <memory>
+#include <mutex>
 
 #include "core/adb/AdbProcess.h"
 #include "core/audio/AudioDecoder.h"
@@ -76,7 +78,8 @@ public:
     void sendControlMessage(const QByteArray &message);
     void releaseAllTouches();
 
-    const Stats &stats() const { return m_stats; }
+    /// 返回统计快照（流线程会并发更新分辨率/编码信息）。
+    Stats stats() const;
 
 signals:
     void devicesChanged(QList<ks::AdbDevice> devices);
@@ -129,13 +132,14 @@ private:
     quint32 m_videoCodecTag = 0;
     QByteArray m_videoExtradata;
 
+    mutable std::mutex m_statsMutex;
     Stats m_stats;
     QTimer m_statsTimer;
-    qint64 m_frameCounter = 0;
-    qint64 m_byteCounter = 0;
+    std::atomic<qint64> m_frameCounter{0};
+    std::atomic<qint64> m_byteCounter{0};
     qint64 m_lastStatsTickMs = 0;
-    double m_decodeAccumMs = 0.0;
-    qint64 m_decodeSamples = 0;
+    std::atomic<double> m_decodeAccumMs{0.0};
+    std::atomic<qint64> m_decodeSamples{0};
     QTimer m_reconnectTimer;
     bool m_screenOff = false;
     int m_summonKey = 0x12; ///< VK_MENU

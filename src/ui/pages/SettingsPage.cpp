@@ -19,6 +19,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QShowEvent>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -154,11 +156,26 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     connect(m_resolutionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int) { storeProfile(); });
     connect(m_fpsCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            [this](int) { storeProfile(); });
+            [this](int index) {
+                if (m_syncing) {
+                    return;
+                }
+                if (index == 2 && !LicenseManager::instance().isPro()) {
+                    QSignalBlocker blocker(m_fpsCombo);
+                    m_fpsCombo->setCurrentIndex(1);
+                    QMessageBox::information(this, QStringLiteral("Pro 功能"),
+                                             QStringLiteral("120 fps 为 Pro 功能，激活后解锁。"));
+                    return;
+                }
+                storeProfile();
+            });
     connect(m_bitrateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int) { storeProfile(); });
     connect(m_audioCheck, &QCheckBox::toggled, this, [this](bool) { storeProfile(); });
     connect(m_screenOffCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_syncing) {
+            return;
+        }
         if (checked && !LicenseManager::instance().isPro()) {
             m_syncing = true;
             m_screenOffCheck->setChecked(false);
@@ -171,6 +188,9 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
         storeProfile();
     });
     connect(m_humanizerCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_syncing) {
+            return;
+        }
         Profile profile = m_session->profile();
         profile.humanizerEnabled = checked;
         m_session->applyProfile(profile, true);
@@ -353,6 +373,12 @@ void SettingsPage::addRow(QWidget *section, const QString &label, QWidget *contr
         title->setMinimumWidth(120);
         form->addRow(title, control);
     }
+}
+
+void SettingsPage::showEvent(QShowEvent *event) {
+    QWidget::showEvent(event);
+    // 投屏页工具栏/键位方案可能已修改当前方案，进入设置页时重新同步，避免显示旧值。
+    syncFromProfile();
 }
 
 void SettingsPage::syncFromProfile() {

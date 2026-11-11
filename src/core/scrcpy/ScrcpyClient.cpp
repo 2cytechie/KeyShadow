@@ -106,6 +106,11 @@ void ScrcpyStreamReader::stop() {
     if (m_thread.joinable()) {
         m_thread.join();
     }
+    // detachSockets() 后 socket 所有权已移交本对象，必须在这里关闭，否则每次重连都会泄漏句柄。
+    if (m_socket) {
+        ::closesocket(static_cast<SOCKET>(m_socket));
+        m_socket = 0;
+    }
     m_running.store(false);
 }
 
@@ -183,6 +188,19 @@ ScrcpyClient::ScrcpyClient(QObject *parent) : QObject(parent) { ensureWinsock();
 ScrcpyClient::~ScrcpyClient() { stop(); }
 
 void ScrcpyClient::start(const ScrcpyConfig &config) {
+    // 防御：上一次连接失败时 postFailed() 只置位 m_running，线程对象可能仍 joinable。
+    // 这里先回收，避免给 joinable std::thread 赋值导致进程终止。
+    if (m_thread.joinable()) {
+        m_stopRequested.store(true);
+        closeSocket(m_listenSocket);
+        closeSocket(m_videoSocket);
+        closeSocket(m_audioSocket);
+        closeSocket(m_controlSocket);
+        m_thread.join();
+        m_stopRequested.store(false);
+        m_running.store(false);
+    }
+
     if (m_running.exchange(true)) {
         return;
     }
@@ -368,14 +386,14 @@ void ScrcpyClient::postFailed(const QString &reason) {
 }
 
 void ScrcpyClient::cleanupTunnel() {
+    // 反向隧道与本会话 scrcpy-server 的清理都改为异步，避免断开/重连时阻塞 UI 线程。
+    // 按 scid 精确匹配，避免误杀随后新建的会话进程。
     AdbProcess adb;
     adb.setAdbPath(m_config.adbPath.isEmpty() ? AdbProcess::resolveAdbPath() : m_config.adbPath);
-    if (!m_socketName.isEmpty()) {
-        adb.removeReverse(m_config.serial, m_socketName);
-    }
-    if (!m_config.serial.isEmpty()) {
-        adb.shell(m_config.serial,
-                  QStringLiteral("pkill -f com.genymobile.scrcpy.Server"));
+    adb.removeReverseDetached(m_config.serial, m_socketName);
+    const QString scid = m_socketName.section(QLatin1Char('_'), 1);
+    if (!scid.isEmpty()) {
+        adb.shellDetached(m_config.serial, QStringLiteral("pkill -f \"scid=%1\"").arg(scid));
     }
     closeSocket(m_listenSocket);
     closeSocket(m_videoSocket);

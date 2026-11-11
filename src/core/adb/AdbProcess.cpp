@@ -138,7 +138,9 @@ QList<AdbDevice> AdbProcess::listDevices(QString *error) {
                 device.transport = QStringLiteral("usb");
             }
         }
-        if (device.state == QStringLiteral("device")) {
+        // 保留 unauthorized/offline 等状态：设备页需要提示“等待 USB 授权”，
+        // 而不是把已插入但未授权的手机直接当作“未检测到设备”。
+        if (!device.state.isEmpty()) {
             devices.append(device);
         }
     }
@@ -246,6 +248,24 @@ bool AdbProcess::removeReverse(const QString &serial, const QString &deviceSocke
         error->clear();
     }
     return ok;
+}
+
+void AdbProcess::removeReverseDetached(const QString &serial, const QString &deviceSocketName) {
+    if (serial.isEmpty() || deviceSocketName.isEmpty()) {
+        return;
+    }
+    QProcess::startDetached(m_adbPath,
+                            {QStringLiteral("-s"), serial, QStringLiteral("reverse"),
+                             QStringLiteral("--remove"),
+                             QStringLiteral("localabstract:") + deviceSocketName});
+}
+
+void AdbProcess::shellDetached(const QString &serial, const QString &command) {
+    if (serial.isEmpty() || command.isEmpty()) {
+        return;
+    }
+    QProcess::startDetached(m_adbPath,
+                            {QStringLiteral("-s"), serial, QStringLiteral("shell"), command});
 }
 
 bool AdbProcess::startServerDetached(const QString &serial, const QString &command, qint64 *pidOut,

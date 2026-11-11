@@ -44,6 +44,10 @@ public:
                  QString *error = nullptr);
     bool removeReverse(const QString &serial, const QString &deviceSocketName,
                        QString *error = nullptr);
+    /// 异步移除反向隧道（不阻塞 UI 线程，用于断开/重连清理）。
+    void removeReverseDetached(const QString &serial, const QString &deviceSocketName);
+    /// 异步执行 `adb shell <command>`（用于清理本会话的 scrcpy-server 进程）。
+    void shellDetached(const QString &serial, const QString &command);
 
     /// 以分离进程启动 `adb -s <serial> shell <command>`。
     bool startServerDetached(const QString &serial, const QString &command, qint64 *pidOut = nullptr,

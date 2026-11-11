@@ -38,6 +38,9 @@ public:
     /// 长按「对比原图」时临时旁路全部增强参数。
     void setBypassEnhance(bool bypass);
 
+    /// 无视频帧时的占位宽高比（如设备分辨率 1080×2400）；有帧时以帧宽高比为准。
+    void setFallbackAspect(double aspect);
+
     /// 画面（含信箱黑边）在控件内的实际显示矩形。
     QRect videoRect() const;
 

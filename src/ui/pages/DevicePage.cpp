@@ -16,6 +16,8 @@
 namespace ks::ui {
 namespace {
 
+constexpr int kDeviceStateRole = Qt::UserRole + 1;
+
 QLabel *makeStep(int number, const QString &text) {
     auto *label = new QLabel(QStringLiteral("①  %1").arg(text));
     if (number == 2) {
@@ -126,11 +128,14 @@ DevicePage::DevicePage(Session *session, QWidget *parent) : QWidget(parent), m_s
         if (!item) {
             return;
         }
+        if (item->data(kDeviceStateRole).toString() != QStringLiteral("device")) {
+            m_statusLabel->setText(QStringLiteral("请在手机上点击「允许」完成 USB 调试授权后重试"));
+            return;
+        }
         emit connectRequested(item->data(Qt::UserRole).toString());
     });
-    connect(m_deviceList, &QListWidget::itemSelectionChanged, this, [this] {
-        m_connectButton->setEnabled(!m_deviceList->selectedItems().isEmpty());
-    });
+    connect(m_deviceList, &QListWidget::itemSelectionChanged, this,
+            [this] { updateConnectAvailability(); });
 
     if (m_session) {
         connect(m_session, &Session::devicesChanged, this,
@@ -164,23 +169,50 @@ void DevicePage::rebuildDeviceList() {
         return;
     }
     const QList<AdbDevice> devices = m_session->devices();
+    QListWidgetItem *firstReady = nullptr;
     for (const AdbDevice &device : devices) {
         QString title = device.model.isEmpty() ? device.serial : device.model;
         title.replace(QLatin1Char('_'), QLatin1Char(' '));
+        QString stateText = device.state;
+        if (stateText == QStringLiteral("unauthorized")) {
+            stateText = QStringLiteral("等待授权");
+        } else if (stateText == QStringLiteral("offline")) {
+            stateText = QStringLiteral("离线");
+        }
         auto *item = new QListWidgetItem(
-            QStringLiteral("●  %1    %2    %3").arg(title, device.serial, device.state));
+            QStringLiteral("●  %1    %2    %3").arg(title, device.serial, stateText));
         item->setData(Qt::UserRole, device.serial);
+        item->setData(kDeviceStateRole, device.state);
         m_deviceList->addItem(item);
+        if (device.state == QStringLiteral("device") && !firstReady) {
+            firstReady = item;
+        }
     }
     const bool empty = devices.isEmpty();
     m_emptyHint->setVisible(empty);
     m_deviceList->setVisible(!empty);
-    m_connectButton->setEnabled(!empty);
     if (!empty) {
-        m_deviceList->setCurrentRow(0);
-        m_statusLabel->setText(QStringLiteral("已检测到 %1 台设备").arg(devices.size()));
+        m_deviceList->setCurrentItem(firstReady ? firstReady : m_deviceList->item(0));
+        m_statusLabel->setText(
+            firstReady ? QStringLiteral("已检测到 %1 台设备").arg(devices.size())
+                       : QStringLiteral("设备已连接，请在手机上点击「允许」完成 USB 调试授权"));
     } else {
         m_statusLabel->setText(QStringLiteral("等待设备接入…"));
+    }
+}
+
+void DevicePage::updateConnectAvailability() {
+    const QListWidgetItem *item = m_deviceList->currentItem();
+    const bool ready = item && item->data(kDeviceStateRole).toString() == QStringLiteral("device");
+    m_connectButton->setEnabled(ready);
+    if (!item) {
+        return;
+    }
+    if (!ready) {
+        m_statusLabel->setText(QStringLiteral("请在手机上点击「允许」完成 USB 调试授权后重试"));
+    } else if (m_session && m_session->state() != Session::State::Streaming) {
+        m_statusLabel->setText(QStringLiteral("已选择 %1，点击「开始连接」")
+                                   .arg(item->data(Qt::UserRole).toString()));
     }
 }
 

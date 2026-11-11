@@ -174,6 +174,11 @@ QString Session::ensureServerJar() {
 void Session::connectDevice(const QString &serial) {
     if (m_state == State::Connecting || m_state == State::Streaming) {
         disconnectDevice();
+    } else {
+        // 上一次连接失败后，ScrcpyClient 的工作线程对象仍可能 joinable；
+        // 必须先回收，否则 start() 给 joinable std::thread 赋值会触发 std::terminate。
+        stopStreams();
+        m_client.stop();
     }
 
     if (serial.isEmpty()) {
@@ -227,8 +232,10 @@ void Session::stopStreams() {
     m_audioPlayer.stop();
     m_audioDecoder.close();
     m_videoDecoder.close();
-    m_frameCounter = 0;
-    m_byteCounter = 0;
+    m_frameCounter.store(0);
+    m_byteCounter.store(0);
+    m_decodeAccumMs.store(0.0);
+    m_decodeSamples.store(0);
 }
 
 void Session::disconnectDevice() {
@@ -375,7 +382,10 @@ void Session::startAudio() {
         emit logMessage(QStringLiteral("音频输出不可用：%1").arg(error));
         return;
     }
-    m_stats.audioEnabled = true;
+    {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+        m_stats.audioEnabled = true;
+    }
     emit logMessage(QStringLiteral("音频通道已开启（%1Hz / %2 声道）")
                         .arg(m_audioPlayer.sampleRate())
                         .arg(m_audioPlayer.channels()));
@@ -391,20 +401,36 @@ void Session::onVideoSession(int width, int height) {
     if (width <= 0 || height <= 0) {
         return;
     }
+    bool resolutionChanged = false;
+    {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+        resolutionChanged =
+            m_stats.videoWidth > 0 && (m_stats.videoWidth != width || m_stats.videoHeight != height);
+        m_stats.videoWidth = width;
+        m_stats.videoHeight = height;
+    }
     m_screenWidth = width;
     m_screenHeight = height;
-    m_stats.videoWidth = width;
-    m_stats.videoHeight = height;
     m_injection.setScreenSize(width, height);
+    if (resolutionChanged) {
+        // 横竖屏切换/分辨率变化：丢弃旧解码器，等待新的配置包后按新参数重建。
+        m_videoDecoder.close();
+    }
     emit logMessage(QStringLiteral("视频流分辨率：%1×%2").arg(width).arg(height));
 }
 
 void Session::onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame, bool configPacket) {
-    m_byteCounter += payload.size();
+    m_byteCounter.fetch_add(static_cast<qint64>(payload.size()));
 
-    // 配置包（SPS/PPS）作为解码器 extradata，避免部分机型仅在此处携带参数集
+    // 配置包（SPS/PPS）作为解码器 extradata，避免部分机型仅在此处携带参数集。
+    // 旋转/分辨率变化时配置包内容会更新，必须重建解码器，否则会沿用旧参数导致花屏。
     if (configPacket) {
-        m_videoExtradata = payload;
+        if (m_videoExtradata != payload) {
+            m_videoExtradata = payload;
+            if (m_videoDecoder.isOpen()) {
+                m_videoDecoder.close();
+            }
+        }
         return;
     }
 
@@ -415,12 +441,16 @@ void Session::onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame
             emit logMessage(QStringLiteral("视频解码初始化失败：%1").arg(error));
             return;
         }
-        m_stats.videoCodec = m_videoDecoder.codecName();
-        m_stats.hardwareDecode = m_videoDecoder.hardwareAccelerated();
+        const QString codecName = m_videoDecoder.codecName();
+        const bool hardwareDecode = m_videoDecoder.hardwareAccelerated();
+        {
+            std::lock_guard<std::mutex> lock(m_statsMutex);
+            m_stats.videoCodec = codecName;
+            m_stats.hardwareDecode = hardwareDecode;
+        }
         emit logMessage(QStringLiteral("视频解码：%1（%2）")
-                            .arg(m_stats.videoCodec,
-                                 m_stats.hardwareDecode ? QStringLiteral("硬件")
-                                                        : QStringLiteral("软件")));
+                            .arg(codecName, hardwareDecode ? QStringLiteral("硬件")
+                                                           : QStringLiteral("软件")));
     }
 
     const qint64 start = monotonicNowMs();
@@ -428,14 +458,18 @@ void Session::onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame
     const bool ok = m_videoDecoder.decode(
         payload.constData(), payload.size(), pts, keyFrame,
         [this](const VideoFramePtr &frame) {
-            m_frameCounter += 1;
-            m_stats.videoWidth = frame->width;
-            m_stats.videoHeight = frame->height;
+            m_frameCounter.fetch_add(1);
+            {
+                std::lock_guard<std::mutex> lock(m_statsMutex);
+                m_stats.videoWidth = frame->width;
+                m_stats.videoHeight = frame->height;
+            }
             emit frameReady(frame);
         },
         &error);
-    m_decodeAccumMs += static_cast<double>(monotonicNowMs() - start);
-    m_decodeSamples += 1;
+    m_decodeAccumMs.store(m_decodeAccumMs.load(std::memory_order_relaxed) +
+                          static_cast<double>(monotonicNowMs() - start));
+    m_decodeSamples.fetch_add(1);
     if (!ok && !error.isEmpty()) {
         emit logMessage(QStringLiteral("解码错误：%1").arg(error));
     }
@@ -474,17 +508,26 @@ void Session::updateStats() {
     const double elapsedSeconds = std::max(0.001, (now - m_lastStatsTickMs) / 1000.0);
     m_lastStatsTickMs = now;
 
-    m_stats.fps = m_frameCounter / elapsedSeconds;
-    m_stats.bitrateMbps = (m_byteCounter * 8.0) / elapsedSeconds / 1'000'000.0;
-    m_stats.inputLatencyMs = m_injection.takeLatencyMs();
-    m_stats.decodeMs = m_decodeSamples > 0 ? m_decodeAccumMs / m_decodeSamples : 0.0;
+    const qint64 frames = m_frameCounter.exchange(0);
+    const qint64 bytes = m_byteCounter.exchange(0);
+    const qint64 decodeSamples = m_decodeSamples.exchange(0);
+    const double decodeAccumMs = m_decodeAccumMs.exchange(0.0);
 
-    m_frameCounter = 0;
-    m_byteCounter = 0;
-    m_decodeAccumMs = 0.0;
-    m_decodeSamples = 0;
+    Stats snapshot;
+    {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+        m_stats.fps = frames / elapsedSeconds;
+        m_stats.bitrateMbps = (bytes * 8.0) / elapsedSeconds / 1'000'000.0;
+        m_stats.inputLatencyMs = m_injection.takeLatencyMs();
+        m_stats.decodeMs = decodeSamples > 0 ? decodeAccumMs / decodeSamples : 0.0;
+        snapshot = m_stats;
+    }
+    emit statsChanged(snapshot);
+}
 
-    emit statsChanged(m_stats);
+Session::Stats Session::stats() const {
+    std::lock_guard<std::mutex> lock(m_statsMutex);
+    return m_stats;
 }
 
 } // namespace ks

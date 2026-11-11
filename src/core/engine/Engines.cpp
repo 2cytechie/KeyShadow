@@ -137,6 +137,14 @@ void JoystickEngine::reset() {
     m_up = m_down = m_left = m_right = false;
 }
 
+void JoystickEngine::release(const std::function<void(const QByteArray &)> &send) {
+    if (m_active) {
+        send(touchMessage(kJoystickPointer, proto::TouchAction::Up, m_currentPixel, m_screenWidth,
+                          m_screenHeight));
+    }
+    reset();
+}
+
 bool JoystickEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &send) {
     double fx = (m_right ? 1.0 : 0.0) - (m_left ? 1.0 : 0.0);
     double fy = (m_down ? 1.0 : 0.0) - (m_up ? 1.0 : 0.0);
@@ -224,6 +232,15 @@ void LookEngine::reset() {
     m_accumX = 0.0;
     m_accumY = 0.0;
     m_active = false;
+}
+
+void LookEngine::release(const std::function<void(const QByteArray &)> &send) {
+    if (m_active) {
+        emitTouch(send, static_cast<int>(proto::TouchAction::Up),
+                  static_cast<int>(std::lround(m_fingerPixel.x())),
+                  static_cast<int>(std::lround(m_fingerPixel.y())));
+    }
+    reset();
 }
 
 void LookEngine::emitTouch(const std::function<void(const QByteArray &)> &send, int action, int x,
@@ -605,6 +622,21 @@ void InputEngine::handleInput(const InputEvent &event) {
         return;
     }
 
+    // WASD → 摇杆方向键状态（基础版核心走位，不依赖键位方案）
+    if (event.type == InputEventType::Key) {
+        bool wasd = true;
+        switch (event.vk) {
+        case 'W': m_joyUp = event.down; break;
+        case 'S': m_joyDown = event.down; break;
+        case 'A': m_joyLeft = event.down; break;
+        case 'D': m_joyRight = event.down; break;
+        default: wasd = false; break;
+        }
+        if (wasd) {
+            m_joystick.setKeys(m_joyUp, m_joyDown, m_joyLeft, m_joyRight);
+        }
+    }
+
     InputEvent stamped = event;
     stamped.timestampNs = qpcNow();
     m_lastInputQpc = stamped.timestampNs;
@@ -646,8 +678,9 @@ void InputEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &
 }
 
 void InputEngine::releaseAll(const std::function<void(const QByteArray &)> &send) {
-    m_joystick.reset();
-    m_look.reset();
+    m_joyUp = m_joyDown = m_joyLeft = m_joyRight = false;
+    m_joystick.release(send);
+    m_look.release(send);
     m_keymap.releaseAll(send);
 }
 

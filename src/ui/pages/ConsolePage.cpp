@@ -151,11 +151,22 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
                         if (m_mode == InputMode::Edit && m_video->hasFrame()) {
                             m_overlay->setEmptyHint(QString());
                         }
+                        if (m_keymapDirty) {
+                            showHud(QStringLiteral("有未保存的键位修改，可继续编辑后保存"));
+                        }
                     } else {
                         m_video->clearFrame();
+                        const QSize fallback = deviceSize();
+                        m_video->setFallbackAspect(fallback.width() /
+                                                   static_cast<double>(fallback.height()));
                         if (m_mode == InputMode::Edit) {
-                            exitKeymapEdit(false);
-                            showHud(QStringLiteral("设备已断开，键位修改未保存"));
+                            // 保留未保存键位：同步叠加层 → 内存方案，退出编辑但不清理 dirty，
+                            // 重新连接/再次进入编辑后可继续保存（R2/04 §5.4）。
+                            m_keymapProfile = m_overlay->profile();
+                            m_keymapSelected = -1;
+                            m_overlay->setSelected(-1);
+                            setKeymapEditUi(false);
+                            showHud(QStringLiteral("设备已断开，键位修改已保留，重新连接后可继续保存"));
                         }
                         setInputMode(InputMode::Idle);
                         m_summonHeld = false;
@@ -195,8 +206,7 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
     layout->setSpacing(10);
 
     m_deviceCapsule = new QLabel(QStringLiteral("○  未连接"), m_toolbar);
-    m_deviceCapsule->setStyleSheet(QStringLiteral(
-        "background: #1A1F26; border-radius: 14px; padding: 4px 12px; color: #9BA7B4;"));
+    m_deviceCapsule->setObjectName(QStringLiteral("DeviceCapsule"));
     layout->addWidget(m_deviceCapsule);
 
     auto makeCombo = [this](const QStringList &items, int current) {
@@ -232,13 +242,20 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
     m_latencyLabel = makeMonoLabel(m_toolbar, QStringLiteral("-- ms"), 7);
     layout->addWidget(m_latencyLabel);
 
-    auto *fullscreenButton = new QPushButton(m_toolbar);
-    fullscreenButton->setIcon(IconFactory::icon(QStringLiteral("maximize"), Theme::textSecondary()));
-    fullscreenButton->setProperty("variant", "ghost");
-    fullscreenButton->setToolTip(QStringLiteral("全屏游戏模式（F11）"));
-    fullscreenButton->setFixedSize(32, 28);
-    layout->addWidget(fullscreenButton);
-    connect(fullscreenButton, &QPushButton::clicked, this, [this] { emit toggleGameMode(); });
+    m_toolbarFullscreenButton = new QPushButton(m_toolbar);
+    m_toolbarFullscreenButton->setIcon(
+        IconFactory::icon(QStringLiteral("maximize"), Theme::textSecondary()));
+    m_toolbarFullscreenButton->setProperty("variant", "ghost");
+    m_toolbarFullscreenButton->setToolTip(QStringLiteral("全屏游戏模式（F11）"));
+    m_toolbarFullscreenButton->setFixedSize(32, 28);
+    layout->addWidget(m_toolbarFullscreenButton);
+    connect(m_toolbarFullscreenButton, &QPushButton::clicked, this, [this] {
+        if (m_mode == InputMode::Edit) {
+            showHud(QStringLiteral("请先退出键位编辑再进入全屏"));
+            return;
+        }
+        emit toggleGameMode();
+    });
 
     connect(m_resolutionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int) { applyVideoOptions(); });
@@ -274,17 +291,24 @@ void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
         m_keymapSelected = index;
         refreshKeymapProperties();
     });
+    // 叠加层内部持有 Profile 副本：每次拖拽/缩放后同步回 ConsolePage，
+    // 否则属性面板、重叠检测与保存都会使用旧坐标。
     connect(m_overlay, &KeymapOverlay::bindingMoved, this, [this](int) {
+        m_keymapProfile = m_overlay->profile();
         refreshKeymapProperties();
         updateKeymapOverlaps();
         markKeymapDirty();
     });
     connect(m_overlay, &KeymapOverlay::bindingResized, this, [this](int) {
+        m_keymapProfile = m_overlay->profile();
         refreshKeymapProperties();
         updateKeymapOverlaps();
         markKeymapDirty();
     });
-    connect(m_overlay, &KeymapOverlay::bindingEdited, this, [this] { markKeymapDirty(); });
+    connect(m_overlay, &KeymapOverlay::bindingEdited, this, [this] {
+        m_keymapProfile = m_overlay->profile();
+        markKeymapDirty();
+    });
     connect(m_overlay, &KeymapOverlay::deleteRequested, this, &ConsolePage::deleteKeymapBinding);
     connect(m_overlay, &KeymapOverlay::saveRequested, this, &ConsolePage::saveKeymap);
     connect(m_overlay, &KeymapOverlay::exitRequested, this, [this] {
@@ -744,16 +768,16 @@ void ConsolePage::layoutVideoOverlays() {
     if (m_overlay) {
         m_overlay->setGeometry(m_video->videoRect());
     }
+    const QRect videoRect = m_video->videoRect();
+    const QRect anchor = videoRect.isEmpty() ? m_video->rect() : videoRect;
     if (m_hud) {
-        m_hud->move(12, m_video->height() - m_hud->height() - 12);
+        m_hud->move(anchor.left() + 12, anchor.bottom() - m_hud->height() - 12);
     }
     if (m_summonHint) {
-        m_summonHint->move(m_video->width() - m_summonHint->width() - 12,
-                           m_video->height() - m_summonHint->height() - 12);
+        m_summonHint->move(anchor.right() - m_summonHint->width() - 12,
+                           anchor.bottom() - m_summonHint->height() - 12);
     }
     if (m_floatingButtons) {
-        const QRect rect = m_video->videoRect();
-        const QRect anchor = rect.isEmpty() ? m_video->rect() : rect;
         m_floatingButtons->move(anchor.right() - m_floatingButtons->width() - 8,
                                 anchor.top() + 8);
     }
@@ -788,6 +812,10 @@ void ConsolePage::refreshProfileToUi() {
     params.gamma = static_cast<float>(profile.gamma);
     params.highlight = static_cast<float>(profile.highlight);
     params.casSharpness = static_cast<float>(profile.casSharpness);
+    if (!LicenseManager::instance().isPro()) {
+        // 未激活时不应用方案/导入文件里的增强参数，保持原始画面。
+        params = VideoWidget::EnhanceParams{};
+    }
     m_video->setEnhanceParams(params);
 
     refreshQualityToUi();
@@ -886,7 +914,7 @@ void ConsolePage::applyVideoOptions() {
 }
 
 void ConsolePage::updateStatsUi() {
-    const Session::Stats &stats = m_session->stats();
+    const Session::Stats stats = m_session->stats();
 
     m_fpsLabel->setText(stats.fps > 0.5 ? QString::number(std::lround(stats.fps))
                                         : QStringLiteral("--"));
@@ -925,6 +953,10 @@ void ConsolePage::updateStatsUi() {
             .arg(stats.videoHeight)
             .arg(stats.hardwareDecode ? QStringLiteral("硬件解码") : QStringLiteral("软件解码")));
 
+    if (!m_video->hasFrame() && stats.videoWidth > 0 && stats.videoHeight > 0) {
+        m_video->setFallbackAspect(stats.videoWidth / static_cast<double>(stats.videoHeight));
+    }
+
     if (m_qualityInfo) {
         if (stats.videoWidth > 0) {
             const int fps = stats.fps > 0.5 ? static_cast<int>(std::lround(stats.fps))
@@ -951,6 +983,8 @@ void ConsolePage::setActive(bool active) {
     }
     m_active = active;
     if (active) {
+        // 激活状态可能在设置页发生变化，进入投屏页时重新应用门槛与增强参数。
+        refreshProfileToUi();
         refreshQualityAvailability();
         setInputMode(m_session && m_session->state() == Session::State::Streaming
                          ? InputMode::Mapping
@@ -1142,7 +1176,7 @@ void ConsolePage::onSummonKeyPressed(bool down) {
 }
 
 QSize ConsolePage::deviceSize() const {
-    const Session::Stats &stats = m_session->stats();
+    const Session::Stats stats = m_session->stats();
     return {stats.videoWidth > 0 ? stats.videoWidth : 1080,
             stats.videoHeight > 0 ? stats.videoHeight : 2400};
 }
@@ -1201,9 +1235,12 @@ void ConsolePage::beginKeymapEditInternal() {
         setInputMode(InputMode::Mapping);
     }
 
-    m_keymapProfile = m_session->profile();
+    // 断线时可能保留了未保存的键位修改；此时沿用内存方案，不重新加载会话方案。
+    const bool restoringUnsaved = m_keymapDirty;
+    if (!restoringUnsaved) {
+        m_keymapProfile = m_session->profile();
+    }
     m_keymapSelected = -1;
-    m_keymapDirty = false;
 
     m_overlay->setProfile(m_keymapProfile);
     m_overlay->setSelected(-1);
@@ -1218,6 +1255,9 @@ void ConsolePage::beginKeymapEditInternal() {
     setKeymapEditUi(true);
     switchInspectorTab(1);
     setInputMode(InputMode::Edit);
+    if (restoringUnsaved) {
+        showHud(QStringLiteral("已恢复未保存的键位修改"));
+    }
 }
 
 void ConsolePage::exitKeymapEdit(bool save) {
@@ -1284,6 +1324,9 @@ void ConsolePage::setKeymapEditUi(bool editing) {
     m_newProfileButton->setEnabled(!editing);
     m_importProfileButton->setEnabled(!editing);
     m_exportProfileButton->setEnabled(!editing);
+    if (m_toolbarFullscreenButton) {
+        m_toolbarFullscreenButton->setEnabled(!editing);
+    }
     if (editing) {
         refreshKeymapProperties();
     }
@@ -1316,6 +1359,7 @@ void ConsolePage::loadKeymapProfile(const QString &name) {
     }
     m_keymapProfile = profile;
     m_keymapSelected = -1;
+    m_keymapDirty = false;
     m_overlay->setSelected(-1);
     m_overlay->setProfile(m_keymapProfile);
     refreshKeymapSummary();
@@ -1362,6 +1406,7 @@ void ConsolePage::createKeymapProfile() {
         return;
     }
     m_keymapProfile = profile;
+    m_keymapDirty = false;
     m_session->applyProfile(profile, false);
     reloadKeymapProfiles();
     m_overlay->setProfile(m_keymapProfile);
@@ -1405,6 +1450,7 @@ void ConsolePage::importKeymapProfile() {
         return;
     }
     m_keymapProfile = imported;
+    m_keymapDirty = false;
     m_session->applyProfile(imported, false);
     reloadKeymapProfiles();
     m_overlay->setProfile(m_keymapProfile);
@@ -1589,6 +1635,10 @@ void ConsolePage::applyBindingFromUi() {
 }
 
 void ConsolePage::openCalibration() {
+    if (!m_session || m_session->state() != Session::State::Streaming) {
+        showHud(QStringLiteral("未连接设备，无法进行灵敏度校准"));
+        return;
+    }
     auto *dialog = new QDialog(this);
     dialog->setWindowTitle(QStringLiteral("灵敏度校准"));
     dialog->setMinimumWidth(460);
@@ -1668,10 +1718,10 @@ void ConsolePage::openCalibration() {
         startButton->setEnabled(true);
     });
 
-    QObject::connect(closeButton, &QPushButton::clicked, dialog, [dialog] {
-        dialog->reject();
-        dialog->deleteLater();
-    });
+    QObject::connect(closeButton, &QPushButton::clicked, dialog, [dialog] { dialog->reject(); });
+    // 无论以何种方式关闭，都结束/取消测量；否则 SensCalibrator 会保持激活并吞掉全部输入。
+    QObject::connect(dialog, &QDialog::finished, dialog,
+                     [this](int) { m_session->endCalibration(); });
     QObject::connect(dialog, &QDialog::rejected, dialog, &QObject::deleteLater);
 
     dialog->show();
@@ -1683,7 +1733,9 @@ void ConsolePage::openCalibration() {
 void ConsolePage::showHud(const QString &text, bool persistent) {
     m_hud->setText(text);
     m_hud->adjustSize();
-    m_hud->move(12, m_video->height() - m_hud->height() - 12);
+    const QRect videoRect = m_video->videoRect();
+    const QRect anchor = videoRect.isEmpty() ? m_video->rect() : videoRect;
+    m_hud->move(anchor.left() + 12, anchor.bottom() - m_hud->height() - 12);
     m_hud->show();
     m_hud->raise();
     if (persistent) {
@@ -1712,7 +1764,7 @@ QString ConsolePage::pointerHudText() const {
     if (m_summonMode == SummonMode::Hold) {
         return QStringLiteral("鼠标模式 · 松开 %1 返回游戏").arg(vkName(m_summonKey));
     }
-    return QStringLiteral("鼠标模式 · 点击手机画面操作 · %1 返回").arg(vkName(m_summonKey));
+    return QStringLiteral("鼠标模式 · 点击手机画面操作 · 再按 %1 返回").arg(vkName(m_summonKey));
 }
 
 void ConsolePage::updateSummonText() {
@@ -1721,7 +1773,7 @@ void ConsolePage::updateSummonText() {
     }
     const QString action =
         m_summonMode == SummonMode::Hold ? QStringLiteral("按住") : QStringLiteral("长按");
-    m_summonHint->setText(QStringLiteral("%1 %2呼出鼠标").arg(action, vkName(m_summonKey)));
+    m_summonHint->setText(QStringLiteral("%1 %2 呼出鼠标").arg(action, vkName(m_summonKey)));
     m_summonHint->adjustSize();
 }
 
@@ -1823,12 +1875,10 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
                 return true;
             }
             if (m_mode == InputMode::Pointer) {
+                // 指针模式滚轮仅在画面矩形内注入；信箱黑边与画面外忽略（R5/R6）。
                 const QRect rect = m_video->videoRect();
-                QPoint clamped = pos;
-                clamped.setX(std::clamp(clamped.x(), rect.left(), rect.right()));
-                clamped.setY(std::clamp(clamped.y(), rect.top(), rect.bottom()));
                 QPoint device;
-                if (mapToDevice(rect.contains(pos) ? pos : clamped, &device)) {
+                if (!rect.isEmpty() && rect.contains(pos) && mapToDevice(pos, &device)) {
                     const QSize size = deviceSize();
                     m_session->sendControlMessage(proto::scroll(
                         device.x(), device.y(), size.width(), size.height(), 0.0f,

@@ -146,7 +146,6 @@ void MainWindow::buildTitleBar(QWidget *root, QVBoxLayout *layout) {
     auto *minimize = makeWindowButton(QStringLiteral("minimize"), QStringLiteral("WindowButton"));
     auto *maximize = makeWindowButton(QStringLiteral("maximize"), QStringLiteral("WindowButton"));
     auto *closeButton = makeWindowButton(QStringLiteral("close"), QStringLiteral("WindowClose"));
-    closeButton->setObjectName(QStringLiteral("WindowButton"));
     bar->addWidget(minimize);
     bar->addWidget(maximize);
     bar->addWidget(closeButton);
