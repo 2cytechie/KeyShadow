@@ -1,0 +1,12 @@
+build/
+out/
+*.user
+.vs/
+.vscode/
+CMakeSettings.json
+aqtinstall.log
+*.log
+resources/scrcpy-server.jar
+
+.screenshots/
+.trae/

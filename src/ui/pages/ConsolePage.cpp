@@ -1,0 +1,1945 @@
+#include "ui/pages/ConsolePage.h"
+
+#include "app/Session.h"
+#include "core/scrcpy/Protocol.h"
+#include "license/LicenseManager.h"
+#include "ui/IconFactory.h"
+#include "ui/KeyNames.h"
+#include "ui/KeymapOverlay.h"
+#include "ui/TabStrip.h"
+#include "ui/Theme.h"
+#include "ui/VideoWidget.h"
+
+#include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QMouseEvent>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QSettings>
+#include <QSignalBlocker>
+#include <QSlider>
+#include <QSpinBox>
+#include <QStackedWidget>
+#include <QTimer>
+#include <QToolButton>
+#include <QVBoxLayout>
+#include <QWheelEvent>
+
+#include <algorithm>
+#include <cmath>
+
+namespace ks::ui {
+namespace {
+
+QLabel *makeMonoLabel(QWidget *parent, const QString &text, int widthChars) {
+    auto *label = new QLabel(text, parent);
+    label->setProperty("variant", "mono");
+    label->setFont(Theme::monoFont(12));
+    label->setMinimumWidth(widthChars * 8);
+    label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    return label;
+}
+
+QString formatQualityValue(const QString &key, int value, const QString &suffix) {
+    if (key == QStringLiteral("gamma")) {
+        return QString::number(value / 100.0, 'f', 2);
+    }
+    if (key == QStringLiteral("brightness") || key == QStringLiteral("contrast") ||
+        key == QStringLiteral("saturation")) {
+        return value > 0 ? QStringLiteral("+%1").arg(value) : QString::number(value);
+    }
+    return QStringLiteral("%1%2").arg(value).arg(suffix);
+}
+
+QPushButton *makeToolButton(QWidget *parent, const QString &text, const char *variant = nullptr) {
+    auto *button = new QPushButton(text, parent);
+    if (variant) {
+        button->setProperty("variant", variant);
+    }
+    return button;
+}
+
+} // namespace
+
+ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m_session(session) {
+    setObjectName(QStringLiteral("ConsolePage"));
+
+    QSettings settings;
+    m_summonKey = settings.value(QStringLiteral("input/summonKey"), 0x12).toInt();
+    m_summonHoldMs = settings.value(QStringLiteral("input/summonHoldMs"), 300).toInt();
+    m_summonMode = settings.value(QStringLiteral("input/summonMode"), QStringLiteral("longPress"))
+                           .toString() == QStringLiteral("hold")
+                       ? SummonMode::Hold
+                       : SummonMode::LongPress;
+
+    auto *root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+
+    buildToolbar(root);
+
+    auto *center = new QHBoxLayout();
+    center->setContentsMargins(0, 0, 0, 0);
+    center->setSpacing(0);
+
+    buildVideoArea(center);
+    buildInspector(center);
+    root->addLayout(center, 1);
+
+    buildStatusBar(root);
+
+    m_hudTimer = new QTimer(this);
+    m_hudTimer->setSingleShot(true);
+    connect(m_hudTimer, &QTimer::timeout, this, [this] { m_hud->hide(); });
+
+    m_summonHintTimer = new QTimer(this);
+    m_summonHintTimer->setSingleShot(true);
+    connect(m_summonHintTimer, &QTimer::timeout, this, [this] { m_summonHint->hide(); });
+
+    m_summonHoldTimer = new QTimer(this);
+    m_summonHoldTimer->setSingleShot(true);
+    m_summonHoldTimer->setInterval(m_summonHoldMs);
+    connect(m_summonHoldTimer, &QTimer::timeout, this, [this] {
+        if (m_summonHeld) {
+            enterPointerMode();
+        }
+    });
+
+    m_qualityPanel->installEventFilter(this);
+
+    if (m_session) {
+        connect(m_session, &Session::frameReady, this,
+                [this](const VideoFrameConstPtr &frame) {
+                    m_video->setFrame(frame);
+                    if (m_mode == InputMode::Edit) {
+                        m_overlay->setEmptyHint(QString());
+                    }
+                });
+        connect(m_session, &Session::statsChanged, this, [this] { updateStatsUi(); });
+        connect(m_session, &Session::stateChanged, this,
+                [this](Session::State state, const QString &message) {
+                    const bool streaming = state == Session::State::Streaming;
+                    m_deviceCapsule->setText(streaming ? QStringLiteral("●  %1")
+                                                              .arg(m_session->connectedDeviceName())
+                                                        : QStringLiteral("○  %1").arg(message));
+                    m_deviceCapsule->setProperty("state",
+                                                 streaming ? "success"
+                                                 : state == Session::State::Error ? "danger"
+                                                                                  : "secondary");
+                    m_deviceCapsule->style()->unpolish(m_deviceCapsule);
+                    m_deviceCapsule->style()->polish(m_deviceCapsule);
+
+                    if (streaming) {
+                        if (m_active && m_mode != InputMode::Edit) {
+                            setInputMode(InputMode::Mapping);
+                        }
+                        if (!m_summonHintShown) {
+                            showSummonHint();
+                        }
+                        if (m_mode == InputMode::Edit && m_video->hasFrame()) {
+                            m_overlay->setEmptyHint(QString());
+                        }
+                    } else {
+                        m_video->clearFrame();
+                        if (m_mode == InputMode::Edit) {
+                            exitKeymapEdit(false);
+                            showHud(QStringLiteral("设备已断开，键位修改未保存"));
+                        }
+                        setInputMode(InputMode::Idle);
+                        m_summonHeld = false;
+                        m_summonHoldTimer->stop();
+                    }
+                });
+        connect(m_session, &Session::profileChanged, this,
+                [this](const Profile &) { refreshProfileToUi(); });
+    }
+
+    m_keymapProfile = m_session->profile();
+    reloadKeymapProfiles();
+    refreshProfileToUi();
+    refreshKeymapSummary();
+    refreshKeymapProperties();
+    updateKeymapOverlaps();
+    updateSummonText();
+    setKeymapEditUi(false);
+}
+
+ConsolePage::~ConsolePage() {
+    if (m_capturingKey) {
+        qApp->removeEventFilter(this);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 构建：工具栏
+// ---------------------------------------------------------------------------
+void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
+    m_toolbar = new QFrame(this);
+    m_toolbar->setObjectName(QStringLiteral("Toolbar"));
+    m_toolbar->setFixedHeight(48);
+
+    auto *layout = new QHBoxLayout(m_toolbar);
+    layout->setContentsMargins(12, 8, 12, 8);
+    layout->setSpacing(10);
+
+    m_deviceCapsule = new QLabel(QStringLiteral("○  未连接"), m_toolbar);
+    m_deviceCapsule->setStyleSheet(QStringLiteral(
+        "background: #1A1F26; border-radius: 14px; padding: 4px 12px; color: #9BA7B4;"));
+    layout->addWidget(m_deviceCapsule);
+
+    auto makeCombo = [this](const QStringList &items, int current) {
+        auto *combo = new QComboBox(m_toolbar);
+        combo->addItems(items);
+        combo->setCurrentIndex(current);
+        combo->setFixedWidth(96);
+        return combo;
+    };
+
+    m_resolutionCombo = makeCombo({QStringLiteral("原生"), QStringLiteral("1080p"),
+                                   QStringLiteral("720p"), QStringLiteral("480p")},
+                                  0);
+    m_fpsCombo = makeCombo({QStringLiteral("30 fps"), QStringLiteral("60 fps"),
+                            QStringLiteral("120 fps · PRO")},
+                           1);
+    m_bitrateCombo = makeCombo({QStringLiteral("4 Mbps"), QStringLiteral("8 Mbps"),
+                                QStringLiteral("12 Mbps"), QStringLiteral("16 Mbps"),
+                                QStringLiteral("20 Mbps")},
+                               1);
+
+    layout->addWidget(m_resolutionCombo);
+    layout->addWidget(m_fpsCombo);
+    layout->addWidget(m_bitrateCombo);
+    layout->addStretch(1);
+
+    layout->addWidget(new QLabel(QStringLiteral("FPS"), m_toolbar));
+    m_fpsLabel = makeMonoLabel(m_toolbar, QStringLiteral("--"), 4);
+    layout->addWidget(m_fpsLabel);
+
+    layout->addSpacing(8);
+    layout->addWidget(new QLabel(QStringLiteral("延迟"), m_toolbar));
+    m_latencyLabel = makeMonoLabel(m_toolbar, QStringLiteral("-- ms"), 7);
+    layout->addWidget(m_latencyLabel);
+
+    auto *fullscreenButton = new QPushButton(m_toolbar);
+    fullscreenButton->setIcon(IconFactory::icon(QStringLiteral("maximize"), Theme::textSecondary()));
+    fullscreenButton->setProperty("variant", "ghost");
+    fullscreenButton->setToolTip(QStringLiteral("全屏游戏模式（F11）"));
+    fullscreenButton->setFixedSize(32, 28);
+    layout->addWidget(fullscreenButton);
+    connect(fullscreenButton, &QPushButton::clicked, this, [this] { emit toggleGameMode(); });
+
+    connect(m_resolutionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int) { applyVideoOptions(); });
+    connect(m_fpsCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (index == 2 && !LicenseManager::instance().isPro()) {
+                    showHud(QStringLiteral("120fps 为 Pro 功能，激活后解锁"));
+                    QSignalBlocker blocker(m_fpsCombo);
+                    m_fpsCombo->setCurrentIndex(1);
+                    return;
+                }
+                applyVideoOptions();
+            });
+    connect(m_bitrateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int) { applyVideoOptions(); });
+
+    rootLayout->addWidget(m_toolbar);
+}
+
+// ---------------------------------------------------------------------------
+// 构建：视频区
+// ---------------------------------------------------------------------------
+void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
+    m_video = new VideoWidget(this);
+    centerLayout->addWidget(m_video, 1);
+    m_video->installEventFilter(this);
+
+    m_overlay = new KeymapOverlay(m_video);
+    m_overlay->hide();
+    m_overlay->installEventFilter(this);
+
+    connect(m_overlay, &KeymapOverlay::selectedChanged, this, [this](int index) {
+        m_keymapSelected = index;
+        refreshKeymapProperties();
+    });
+    connect(m_overlay, &KeymapOverlay::bindingMoved, this, [this](int) {
+        refreshKeymapProperties();
+        updateKeymapOverlaps();
+        markKeymapDirty();
+    });
+    connect(m_overlay, &KeymapOverlay::bindingResized, this, [this](int) {
+        refreshKeymapProperties();
+        updateKeymapOverlaps();
+        markKeymapDirty();
+    });
+    connect(m_overlay, &KeymapOverlay::bindingEdited, this, [this] { markKeymapDirty(); });
+    connect(m_overlay, &KeymapOverlay::deleteRequested, this, &ConsolePage::deleteKeymapBinding);
+    connect(m_overlay, &KeymapOverlay::saveRequested, this, &ConsolePage::saveKeymap);
+    connect(m_overlay, &KeymapOverlay::exitRequested, this, [this] {
+        if (confirmLeaveEdit()) {
+            exitKeymapEdit(false);
+        }
+    });
+
+    m_hud = new QLabel(m_video);
+    m_hud->setStyleSheet(QStringLiteral(
+        "background: rgba(8,10,13,0.62); color: #E8EDF2; padding: 4px 10px; border-radius: 4px;"));
+    m_hud->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_hud->hide();
+
+    m_summonHint = new QLabel(m_video);
+    m_summonHint->setStyleSheet(QStringLiteral(
+        "background: rgba(8,10,13,0.55); color: #9BA7B4; padding: 4px 10px; border-radius: 4px;"));
+    m_summonHint->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_summonHint->hide();
+
+    buildFloatingButtons();
+
+    connect(m_video, &VideoWidget::doubleClicked, this, [this] {
+        if (m_mode == InputMode::Edit) {
+            return;
+        }
+        emit toggleGameMode();
+    });
+    connect(m_video, &VideoWidget::videoRectChanged, this,
+            [this](const QRect &) { layoutVideoOverlays(); });
+}
+
+void ConsolePage::buildFloatingButtons() {
+    m_floatingButtons = new QWidget(m_video);
+    auto *layout = new QHBoxLayout(m_floatingButtons);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(4);
+
+    m_mouseButton = new QToolButton(m_floatingButtons);
+    m_mouseButton->setIcon(IconFactory::icon(QStringLiteral("mouse"), Theme::textSecondary(), 16));
+    m_mouseButton->setIconSize(QSize(16, 16));
+    m_mouseButton->setFixedSize(28, 28);
+    m_mouseButton->setCheckable(true);
+    m_mouseButton->setToolTip(QStringLiteral("鼠标指针模式"));
+    m_mouseButton->setCursor(Qt::PointingHandCursor);
+
+    m_fullscreenButton = new QToolButton(m_floatingButtons);
+    m_fullscreenButton->setIcon(
+        IconFactory::icon(QStringLiteral("maximize"), Theme::textSecondary(), 16));
+    m_fullscreenButton->setIconSize(QSize(16, 16));
+    m_fullscreenButton->setFixedSize(28, 28);
+    m_fullscreenButton->setToolTip(QStringLiteral("全屏游戏模式（F11）"));
+    m_fullscreenButton->setCursor(Qt::PointingHandCursor);
+
+    layout->addWidget(m_mouseButton);
+    layout->addWidget(m_fullscreenButton);
+    m_floatingButtons->setStyleSheet(
+        QStringLiteral("background: rgba(8,10,13,0.55); border-radius: 6px;"));
+    m_floatingButtons->hide();
+    m_floatingButtons->adjustSize();
+
+    connect(m_fullscreenButton, &QToolButton::clicked, this, [this] { emit toggleGameMode(); });
+    connect(m_mouseButton, &QToolButton::clicked, this, [this](bool checked) {
+        if (checked) {
+            enterPointerMode();
+            if (m_mode != InputMode::Pointer) {
+                QSignalBlocker blocker(m_mouseButton);
+                m_mouseButton->setChecked(false);
+            }
+        } else if (m_mode == InputMode::Pointer) {
+            setInputMode(InputMode::Mapping);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 构建：检查器（画质 / 键位）
+// ---------------------------------------------------------------------------
+void ConsolePage::buildInspector(QHBoxLayout *centerLayout) {
+    m_inspector = new QFrame(this);
+    m_inspector->setObjectName(QStringLiteral("Inspector"));
+    m_inspector->setFixedWidth(320);
+
+    auto *layout = new QVBoxLayout(m_inspector);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    m_tabs = new TabStrip(m_inspector);
+    m_tabs->addTab(QStringLiteral("画质"));
+    m_tabs->addTab(QStringLiteral("键位"));
+    layout->addWidget(m_tabs);
+
+    m_inspectorStack = new QStackedWidget(m_inspector);
+    layout->addWidget(m_inspectorStack, 1);
+
+    m_qualityPanel = buildQualityTab();
+    auto *qualityScroll = new QScrollArea(m_inspectorStack);
+    qualityScroll->setWidgetResizable(true);
+    qualityScroll->setFrameShape(QFrame::NoFrame);
+    qualityScroll->setWidget(m_qualityPanel);
+    m_inspectorStack->addWidget(qualityScroll);
+
+    m_keymapPanel = buildKeymapTab();
+    auto *keymapScroll = new QScrollArea(m_inspectorStack);
+    keymapScroll->setWidgetResizable(true);
+    keymapScroll->setFrameShape(QFrame::NoFrame);
+    keymapScroll->setWidget(m_keymapPanel);
+    m_inspectorStack->addWidget(keymapScroll);
+
+    m_inspectorStack->setCurrentIndex(0);
+
+    connect(m_tabs, &TabStrip::currentChanged, this, [this](int index) {
+        if (!switchInspectorTab(index)) {
+            QSignalBlocker blocker(m_tabs);
+            m_tabs->setCurrentIndex(m_inspectorStack->currentIndex());
+        }
+    });
+
+    centerLayout->addWidget(m_inspector);
+}
+
+QWidget *ConsolePage::buildQualityTab() {
+    auto *panel = new QWidget();
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setSpacing(10);
+
+    auto *titleRow = new QHBoxLayout();
+    auto *title = new QLabel(QStringLiteral("画面增强"), panel);
+    title->setObjectName(QStringLiteral("SectionTitle"));
+    auto *proBadge = new QLabel(QStringLiteral("PRO"), panel);
+    proBadge->setProperty("badge", "pro");
+    titleRow->addWidget(title);
+    titleRow->addWidget(proBadge);
+    titleRow->addStretch(1);
+
+    m_qualityResetButton = new QToolButton(panel);
+    m_qualityResetButton->setIcon(
+        IconFactory::icon(QStringLiteral("refresh"), Theme::textSecondary(), 16));
+    m_qualityResetButton->setIconSize(QSize(16, 16));
+    m_qualityResetButton->setFixedSize(24, 24);
+    m_qualityResetButton->setToolTip(QStringLiteral("重置为方案默认值"));
+    m_qualityResetButton->setCursor(Qt::PointingHandCursor);
+    titleRow->addWidget(m_qualityResetButton);
+    layout->addLayout(titleRow);
+
+    const bool pro = LicenseManager::instance().isPro();
+    if (!pro) {
+        m_qualityLockHint = new QLabel(
+            QStringLiteral("画面增强为 Pro 功能，激活后解锁。基础版可正常投屏与游玩。"), panel);
+        m_qualityLockHint->setProperty("state", "warning");
+        m_qualityLockHint->setWordWrap(true);
+        layout->addWidget(m_qualityLockHint);
+    }
+
+    struct SliderSpec {
+        QString key;
+        QString title;
+        int min;
+        int max;
+        int initial;
+        QString suffix;
+    };
+    const Profile &profile = m_session->profile();
+    const QVector<SliderSpec> specs = {
+        {QStringLiteral("brightness"), QStringLiteral("亮度"), -100, 100,
+         static_cast<int>(profile.brightness), QString()},
+        {QStringLiteral("contrast"), QStringLiteral("对比度"), -100, 100,
+         static_cast<int>(profile.contrast), QString()},
+        {QStringLiteral("saturation"), QStringLiteral("饱和度"), -100, 100,
+         static_cast<int>(profile.saturation), QString()},
+        {QStringLiteral("gamma"), QStringLiteral("Gamma"), 50, 200,
+         static_cast<int>(profile.gamma * 100), QString()},
+        {QStringLiteral("highlight"), QStringLiteral("高光压缩"), 0, 200,
+         static_cast<int>(profile.highlight), QStringLiteral("%")},
+        {QStringLiteral("cas"), QStringLiteral("CAS 锐化"), 0, 100,
+         static_cast<int>(profile.casSharpness), QStringLiteral("%")},
+    };
+
+    for (const SliderSpec &spec : specs) {
+        auto *row = new QWidget(panel);
+        auto *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(8);
+
+        auto *label = new QLabel(spec.title, row);
+        label->setMinimumWidth(64);
+        label->setProperty("variant", "caption");
+
+        auto *slider = new QSlider(Qt::Horizontal, row);
+        slider->setRange(spec.min, spec.max);
+        slider->setValue(spec.initial);
+        slider->setEnabled(pro);
+
+        auto *value = new QLabel(formatQualityValue(spec.key, spec.initial, spec.suffix), row);
+        value->setProperty("variant", "mono");
+        value->setFont(Theme::monoFont(12));
+        value->setMinimumWidth(48);
+        value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        rowLayout->addWidget(label);
+        rowLayout->addWidget(slider, 1);
+        rowLayout->addWidget(value);
+        layout->addWidget(row);
+
+        m_qualityRows.append({spec.key, slider, value, spec.suffix});
+
+        connect(slider, &QSlider::valueChanged, this, [this, key = spec.key,
+                                                       value, suffix = spec.suffix](int v) {
+            value->setText(formatQualityValue(key, v, suffix));
+            if (m_updatingQuality) {
+                return;
+            }
+            Profile updated = m_session->profile();
+            if (key == QStringLiteral("brightness")) {
+                updated.brightness = v;
+            } else if (key == QStringLiteral("contrast")) {
+                updated.contrast = v;
+            } else if (key == QStringLiteral("saturation")) {
+                updated.saturation = v;
+            } else if (key == QStringLiteral("gamma")) {
+                updated.gamma = v / 100.0;
+            } else if (key == QStringLiteral("highlight")) {
+                updated.highlight = v;
+            } else {
+                updated.casSharpness = v;
+            }
+            m_session->applyProfile(updated, false);
+        });
+        connect(slider, &QSlider::sliderReleased, this,
+                [this] { m_session->applyProfile(m_session->profile(), true); });
+    }
+
+    m_compareButton = new QPushButton(QStringLiteral("长按对比原图"), panel);
+    m_compareButton->setEnabled(pro);
+    layout->addWidget(m_compareButton);
+    connect(m_compareButton, &QPushButton::pressed, this, [this] { setBypassEnhance(true); });
+    connect(m_compareButton, &QPushButton::released, this, [this] { setBypassEnhance(false); });
+
+    m_qualityInfo = new QLabel(QStringLiteral("--"), panel);
+    m_qualityInfo->setProperty("variant", "micro");
+    layout->addWidget(m_qualityInfo);
+
+    layout->addStretch(1);
+
+    connect(m_qualityResetButton, &QToolButton::clicked, this, &ConsolePage::resetQuality);
+    return panel;
+}
+
+QWidget *ConsolePage::buildKeymapTab() {
+    auto *panel = new QWidget();
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setSpacing(10);
+
+    auto *profileRow = new QHBoxLayout();
+    auto *profileLabel = new QLabel(QStringLiteral("方案"), panel);
+    profileLabel->setProperty("variant", "caption");
+    m_profileCombo = new QComboBox(panel);
+    profileRow->addWidget(profileLabel);
+    profileRow->addWidget(m_profileCombo, 1);
+    layout->addLayout(profileRow);
+
+    auto *profileActions = new QHBoxLayout();
+    profileActions->setSpacing(8);
+    m_newProfileButton = makeToolButton(panel, QStringLiteral("新建方案"), "ghost");
+    m_importProfileButton = makeToolButton(panel, QStringLiteral("导入"), "ghost");
+    m_exportProfileButton = makeToolButton(panel, QStringLiteral("导出"), "ghost");
+    m_newProfileButton->setFixedHeight(28);
+    m_importProfileButton->setFixedHeight(28);
+    m_exportProfileButton->setFixedHeight(28);
+    m_newProfileButton->setToolTip(QStringLiteral("复制当前方案并另存为新方案"));
+    m_importProfileButton->setToolTip(QStringLiteral("从 JSON 文件导入键位方案"));
+    m_exportProfileButton->setToolTip(QStringLiteral("将当前方案导出为 JSON 文件"));
+    profileActions->addWidget(m_newProfileButton, 1);
+    profileActions->addWidget(m_importProfileButton, 1);
+    profileActions->addWidget(m_exportProfileButton, 1);
+    layout->addLayout(profileActions);
+
+    // 浏览态
+    m_browseBox = new QWidget(panel);
+    auto *browse = new QVBoxLayout(m_browseBox);
+    browse->setContentsMargins(0, 0, 0, 0);
+    browse->setSpacing(10);
+
+    m_keymapSummary = new QLabel(m_browseBox);
+    m_keymapSummary->setProperty("variant", "caption");
+    m_keymapSummary->setWordWrap(true);
+    browse->addWidget(m_keymapSummary);
+
+    m_editKeymapButton = makeToolButton(m_browseBox, QStringLiteral("编辑键位"), "primary");
+    browse->addWidget(m_editKeymapButton);
+
+    m_calibrateButton = makeToolButton(m_browseBox, QStringLiteral("灵敏度校准"));
+    browse->addWidget(m_calibrateButton);
+
+    auto *browseHint = new QLabel(QStringLiteral("F9 也可进入编辑"), m_browseBox);
+    browseHint->setProperty("variant", "micro");
+    browse->addWidget(browseHint);
+
+    layout->addWidget(m_browseBox);
+
+    // 编辑态
+    m_editBox = new QWidget(panel);
+    auto *edit = new QVBoxLayout(m_editBox);
+    edit->setContentsMargins(0, 0, 0, 0);
+    edit->setSpacing(10);
+
+    auto *toggleRow = new QHBoxLayout();
+    m_gridCheck = new QCheckBox(QStringLiteral("网格"), m_editBox);
+    m_gridCheck->setChecked(true);
+    m_snapCheck = new QCheckBox(QStringLiteral("吸附"), m_editBox);
+    m_snapCheck->setChecked(true);
+    toggleRow->addWidget(m_gridCheck);
+    toggleRow->addWidget(m_snapCheck);
+    toggleRow->addStretch(1);
+    edit->addLayout(toggleRow);
+
+    auto *toolRow = new QHBoxLayout();
+    m_addBindingButton = makeToolButton(m_editBox, QStringLiteral("添加键位"), "ghost");
+    m_saveKeymapButton = makeToolButton(m_editBox, QStringLiteral("保存"), "primary");
+    m_exitEditButton = makeToolButton(m_editBox, QStringLiteral("退出编辑"), "ghost");
+    toolRow->addWidget(m_addBindingButton);
+    toolRow->addWidget(m_saveKeymapButton, 1);
+    toolRow->addWidget(m_exitEditButton);
+    edit->addLayout(toolRow);
+
+    auto *divider = new QFrame(m_editBox);
+    divider->setObjectName(QStringLiteral("Divider"));
+    edit->addWidget(divider);
+
+    auto *selectedTitle = new QLabel(QStringLiteral("选中键位"), m_editBox);
+    selectedTitle->setObjectName(QStringLiteral("SectionTitle"));
+    edit->addWidget(selectedTitle);
+
+    auto *keyRow = new QHBoxLayout();
+    keyRow->addWidget(new QLabel(QStringLiteral("按键"), m_editBox));
+    m_keyCaptureButton = new QPushButton(QStringLiteral("--"), m_editBox);
+    keyRow->addWidget(m_keyCaptureButton, 1);
+    edit->addLayout(keyRow);
+
+    auto *positionRow = new QHBoxLayout();
+    positionRow->addWidget(new QLabel(QStringLiteral("X"), m_editBox));
+    m_xSpin = new QSpinBox(m_editBox);
+    m_xSpin->setRange(0, 1000);
+    positionRow->addWidget(m_xSpin);
+    positionRow->addWidget(new QLabel(QStringLiteral("Y"), m_editBox));
+    m_ySpin = new QSpinBox(m_editBox);
+    m_ySpin->setRange(0, 1000);
+    positionRow->addWidget(m_ySpin);
+    edit->addLayout(positionRow);
+
+    auto *sizeRow = new QHBoxLayout();
+    sizeRow->addWidget(new QLabel(QStringLiteral("大小"), m_editBox));
+    m_sizeSlider = new QSlider(Qt::Horizontal, m_editBox);
+    m_sizeSlider->setRange(20, 160);
+    sizeRow->addWidget(m_sizeSlider, 1);
+    edit->addLayout(sizeRow);
+
+    auto *actionRow = new QHBoxLayout();
+    actionRow->addWidget(new QLabel(QStringLiteral("模式"), m_editBox));
+    m_actionCombo = new QComboBox(m_editBox);
+    m_actionCombo->addItems({QStringLiteral("点按"), QStringLiteral("按住"), QStringLiteral("滑动"),
+                             QStringLiteral("双击")});
+    actionRow->addWidget(m_actionCombo, 1);
+    edit->addLayout(actionRow);
+
+    m_deleteBindingButton = makeToolButton(m_editBox, QStringLiteral("删除此键位"), "danger");
+    edit->addWidget(m_deleteBindingButton);
+
+    m_overlapLabel = new QLabel(m_editBox);
+    m_overlapLabel->setWordWrap(true);
+    m_overlapLabel->setProperty("state", "warning");
+    edit->addWidget(m_overlapLabel);
+
+    auto *editHint = new QLabel(
+        QStringLiteral("拖拽放置 · 滚轮缩放 · Delete 删除 · Ctrl+S 保存"), m_editBox);
+    editHint->setProperty("variant", "micro");
+    editHint->setWordWrap(true);
+    edit->addWidget(editHint);
+
+    layout->addWidget(m_editBox);
+    layout->addStretch(1);
+
+    // 交互
+    connect(m_profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (index >= 0) {
+                    loadKeymapProfile(m_profileCombo->itemText(index));
+                }
+            });
+    connect(m_editKeymapButton, &QPushButton::clicked, this, &ConsolePage::beginKeymapEdit);
+    connect(m_newProfileButton, &QPushButton::clicked, this, &ConsolePage::createKeymapProfile);
+    connect(m_importProfileButton, &QPushButton::clicked, this,
+            &ConsolePage::importKeymapProfile);
+    connect(m_exportProfileButton, &QPushButton::clicked, this,
+            &ConsolePage::exportKeymapProfile);
+    connect(m_calibrateButton, &QPushButton::clicked, this, &ConsolePage::openCalibration);
+    connect(m_gridCheck, &QCheckBox::toggled, this,
+            [this](bool on) { m_overlay->setGridEnabled(on); });
+    connect(m_snapCheck, &QCheckBox::toggled, this,
+            [this](bool on) { m_overlay->setSnapEnabled(on); });
+    connect(m_addBindingButton, &QPushButton::clicked, this, &ConsolePage::addKeymapBinding);
+    connect(m_saveKeymapButton, &QPushButton::clicked, this, &ConsolePage::saveKeymap);
+    connect(m_exitEditButton, &QPushButton::clicked, this, [this] {
+        if (confirmLeaveEdit()) {
+            exitKeymapEdit(false);
+        }
+    });
+    connect(m_deleteBindingButton, &QPushButton::clicked, this,
+            &ConsolePage::deleteKeymapBinding);
+    connect(m_keyCaptureButton, &QPushButton::clicked, this, &ConsolePage::startKeyCapture);
+    connect(m_xSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            [this](int) { applyBindingFromUi(); });
+    connect(m_ySpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            [this](int) { applyBindingFromUi(); });
+    connect(m_sizeSlider, &QSlider::valueChanged, this, [this](int) { applyBindingFromUi(); });
+    connect(m_actionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int) { applyBindingFromUi(); });
+
+    return panel;
+}
+
+void ConsolePage::buildStatusBar(QVBoxLayout *rootLayout) {
+    m_statusBar = new QFrame(this);
+    m_statusBar->setObjectName(QStringLiteral("StatusBar"));
+    m_statusBar->setFixedHeight(28);
+
+    auto *layout = new QHBoxLayout(m_statusBar);
+    layout->setContentsMargins(12, 0, 12, 0);
+    layout->setSpacing(16);
+
+    m_statusAdb = new QLabel(QStringLiteral("adb 未连接"), m_statusBar);
+    m_statusAdb->setProperty("variant", "micro");
+    m_statusBitrate = new QLabel(QStringLiteral("0.0 Mbps"), m_statusBar);
+    m_statusBitrate->setProperty("variant", "micro");
+    m_statusBitrate->setFont(Theme::monoFont(11));
+    m_statusLatency = new QLabel(QStringLiteral("输入延迟 --"), m_statusBar);
+    m_statusLatency->setProperty("variant", "micro");
+    m_statusLatency->setFont(Theme::monoFont(11));
+    m_statusCodec = new QLabel(QStringLiteral("--"), m_statusBar);
+    m_statusCodec->setProperty("variant", "micro");
+
+    layout->addWidget(m_statusAdb);
+    layout->addWidget(m_statusBitrate);
+    layout->addWidget(m_statusLatency);
+    layout->addStretch(1);
+    layout->addWidget(m_statusCodec);
+
+    rootLayout->addWidget(m_statusBar);
+}
+
+void ConsolePage::layoutVideoOverlays() {
+    if (!m_video) {
+        return;
+    }
+    if (m_overlay) {
+        m_overlay->setGeometry(m_video->videoRect());
+    }
+    if (m_hud) {
+        m_hud->move(12, m_video->height() - m_hud->height() - 12);
+    }
+    if (m_summonHint) {
+        m_summonHint->move(m_video->width() - m_summonHint->width() - 12,
+                           m_video->height() - m_summonHint->height() - 12);
+    }
+    if (m_floatingButtons) {
+        const QRect rect = m_video->videoRect();
+        const QRect anchor = rect.isEmpty() ? m_video->rect() : rect;
+        m_floatingButtons->move(anchor.right() - m_floatingButtons->width() - 8,
+                                anchor.top() + 8);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 画质 / 视频参数
+// ---------------------------------------------------------------------------
+void ConsolePage::refreshProfileToUi() {
+    if (!m_session) {
+        return;
+    }
+    const Profile &profile = m_session->profile();
+
+    QSignalBlocker blockResolution(m_resolutionCombo);
+    QSignalBlocker blockFps(m_fpsCombo);
+    QSignalBlocker blockBitrate(m_bitrateCombo);
+
+    m_resolutionCombo->setCurrentIndex(profile.maxSize >= 1080 ? 1
+                                   : profile.maxSize >= 720 ? 2
+                                   : profile.maxSize >= 480 ? 3
+                                                            : 0);
+    m_fpsCombo->setCurrentIndex(profile.maxFps >= 120 ? 2 : profile.maxFps >= 60 ? 1 : 0);
+    const int mbps = std::max(1, profile.videoBitRate / 1'000'000);
+    const int bitrateIndex = mbps <= 4 ? 0 : mbps <= 8 ? 1 : mbps <= 12 ? 2 : mbps <= 16 ? 3 : 4;
+    m_bitrateCombo->setCurrentIndex(bitrateIndex);
+
+    VideoWidget::EnhanceParams params;
+    params.brightness = static_cast<float>(profile.brightness);
+    params.contrast = static_cast<float>(profile.contrast);
+    params.saturation = static_cast<float>(profile.saturation);
+    params.gamma = static_cast<float>(profile.gamma);
+    params.highlight = static_cast<float>(profile.highlight);
+    params.casSharpness = static_cast<float>(profile.casSharpness);
+    m_video->setEnhanceParams(params);
+
+    refreshQualityToUi();
+
+    if (m_mode != InputMode::Edit && !m_keymapDirty) {
+        m_keymapProfile = profile;
+        m_overlay->setProfile(m_keymapProfile);
+        refreshKeymapSummary();
+        refreshKeymapProperties();
+        updateKeymapOverlaps();
+    }
+}
+
+void ConsolePage::refreshQualityAvailability() {
+    const bool pro = LicenseManager::instance().isPro();
+    for (const QualityRow &row : m_qualityRows) {
+        row.slider->setEnabled(pro);
+    }
+    if (m_compareButton) {
+        m_compareButton->setEnabled(pro);
+    }
+    if (m_qualityResetButton) {
+        m_qualityResetButton->setEnabled(pro);
+    }
+    if (m_qualityLockHint) {
+        m_qualityLockHint->setVisible(!pro);
+    }
+}
+
+void ConsolePage::refreshQualityToUi() {
+    const Profile &profile = m_session->profile();
+    m_updatingQuality = true;
+    for (const QualityRow &row : m_qualityRows) {
+        int value = 0;
+        if (row.key == QStringLiteral("brightness")) {
+            value = static_cast<int>(profile.brightness);
+        } else if (row.key == QStringLiteral("contrast")) {
+            value = static_cast<int>(profile.contrast);
+        } else if (row.key == QStringLiteral("saturation")) {
+            value = static_cast<int>(profile.saturation);
+        } else if (row.key == QStringLiteral("gamma")) {
+            value = static_cast<int>(profile.gamma * 100);
+        } else if (row.key == QStringLiteral("highlight")) {
+            value = static_cast<int>(profile.highlight);
+        } else {
+            value = static_cast<int>(profile.casSharpness);
+        }
+        QSignalBlocker blocker(row.slider);
+        row.slider->setValue(value);
+        row.value->setText(formatQualityValue(row.key, value, row.suffix));
+    }
+    m_updatingQuality = false;
+}
+
+void ConsolePage::resetQuality() {
+    const auto answer = QMessageBox::question(
+        this, QStringLiteral("重置画面增强"),
+        QStringLiteral("恢复该方案的默认画面增强参数？"), QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+    Profile profile = m_session->profile();
+    profile.brightness = 0;
+    profile.contrast = 0;
+    profile.saturation = 0;
+    profile.gamma = 1.0;
+    profile.highlight = 0;
+    profile.casSharpness = 0;
+    m_session->applyProfile(profile, true);
+    refreshQualityToUi();
+    showHud(QStringLiteral("画面增强已重置"));
+}
+
+void ConsolePage::applyVideoOptions() {
+    if (!m_session) {
+        return;
+    }
+    Profile profile = m_session->profile();
+
+    static const int resolutions[] = {0, 1080, 720, 480};
+    profile.maxSize = resolutions[std::clamp(m_resolutionCombo->currentIndex(), 0, 3)];
+
+    static const int fpsValues[] = {30, 60, 120};
+    profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 2)];
+
+    static const int bitrates[] = {4, 8, 12, 16, 20};
+    profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 4)] * 1'000'000;
+
+    m_session->applyProfile(profile, true);
+
+    if (m_session->state() == Session::State::Streaming && !m_session->connectedSerial().isEmpty()) {
+        showHud(QStringLiteral("视频参数已更新，正在重连…"));
+        m_session->connectDevice(m_session->connectedSerial());
+    }
+}
+
+void ConsolePage::updateStatsUi() {
+    const Session::Stats &stats = m_session->stats();
+
+    m_fpsLabel->setText(stats.fps > 0.5 ? QString::number(std::lround(stats.fps))
+                                        : QStringLiteral("--"));
+    const double latency = stats.inputLatencyMs;
+    if (latency >= 0) {
+        m_latencyLabel->setText(QStringLiteral("%1 ms").arg(latency, 0, 'f', 1));
+        m_latencyLabel->setProperty("state", latency > 100 ? "danger"
+                                        : latency > 60  ? "warning"
+                                                        : "success");
+    } else {
+        m_latencyLabel->setText(QStringLiteral("-- ms"));
+    }
+    m_latencyLabel->style()->unpolish(m_latencyLabel);
+    m_latencyLabel->style()->polish(m_latencyLabel);
+
+    const bool streaming = m_session->state() == Session::State::Streaming;
+    m_statusAdb->setText(streaming ? QStringLiteral("● adb 已连接")
+                                   : QStringLiteral("○ adb 断开"));
+    m_statusAdb->setProperty("state", streaming ? "success" : "secondary");
+    m_statusAdb->style()->unpolish(m_statusAdb);
+    m_statusAdb->style()->polish(m_statusAdb);
+
+    m_statusBitrate->setText(QStringLiteral("%1 Mbps").arg(stats.bitrateMbps, 0, 'f', 1));
+    if (latency >= 0) {
+        m_statusLatency->setText(QStringLiteral("注入 %1 ms · 解码 %2 ms")
+                                     .arg(latency, 0, 'f', 1)
+                                     .arg(stats.decodeMs, 0, 'f', 1));
+    } else {
+        m_statusLatency->setText(QStringLiteral("注入 -- ms · 解码 %1 ms")
+                                     .arg(stats.decodeMs, 0, 'f', 1));
+    }
+    m_statusCodec->setText(
+        QStringLiteral("%1 · %2×%3 · %4")
+            .arg(stats.videoCodec.isEmpty() ? QStringLiteral("--") : stats.videoCodec.toUpper())
+            .arg(stats.videoWidth)
+            .arg(stats.videoHeight)
+            .arg(stats.hardwareDecode ? QStringLiteral("硬件解码") : QStringLiteral("软件解码")));
+
+    if (m_qualityInfo) {
+        if (stats.videoWidth > 0) {
+            const int fps = stats.fps > 0.5 ? static_cast<int>(std::lround(stats.fps))
+                                            : m_session->profile().maxFps;
+            m_qualityInfo->setText(QStringLiteral("%1×%2 · %3fps · %4")
+                                       .arg(stats.videoWidth)
+                                       .arg(stats.videoHeight)
+                                       .arg(fps)
+                                       .arg(stats.videoCodec.isEmpty()
+                                                ? QStringLiteral("--")
+                                                : stats.videoCodec.toUpper()));
+        } else {
+            m_qualityInfo->setText(QStringLiteral("--"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 输入模式
+// ---------------------------------------------------------------------------
+void ConsolePage::setActive(bool active) {
+    if (m_active == active) {
+        return;
+    }
+    m_active = active;
+    if (active) {
+        refreshQualityAvailability();
+        setInputMode(m_session && m_session->state() == Session::State::Streaming
+                         ? InputMode::Mapping
+                         : InputMode::Idle);
+        if (!m_summonHintShown) {
+            showSummonHint();
+        }
+    }
+}
+
+bool ConsolePage::requestDeactivate() {
+    if (m_mode == InputMode::Edit && !confirmLeaveEdit()) {
+        return false;
+    }
+    if (m_mode == InputMode::Edit) {
+        exitKeymapEdit(false);
+    }
+    m_active = false;
+    m_summonHeld = false;
+    m_summonHoldTimer->stop();
+    setInputMode(InputMode::Idle);
+    m_hud->hide();
+    m_summonHint->hide();
+    if (m_floatingButtons) {
+        m_floatingButtons->hide();
+    }
+    return true;
+}
+
+void ConsolePage::setInputMode(InputMode mode) {
+    if (m_mode == mode) {
+        updateInputCapture();
+        return;
+    }
+
+    const InputMode previous = m_mode;
+    if (m_session) {
+        m_session->releaseAllTouches();
+    }
+    m_mode = mode;
+    m_draggingTouch = false;
+
+    if (mode != InputMode::Edit) {
+        m_overlay->hide();
+        if (m_capturingKey) {
+            stopKeyCapture();
+        }
+    }
+
+    switch (mode) {
+    case InputMode::Pointer:
+        m_video->setFocus();
+        showHud(pointerHudText(), true);
+        if (m_mouseButton) {
+            QSignalBlocker blocker(m_mouseButton);
+            m_mouseButton->setChecked(true);
+        }
+        if (m_floatingButtons) {
+            m_floatingButtons->show();
+            m_floatingButtons->raise();
+        }
+        break;
+    case InputMode::Mapping:
+        if (previous == InputMode::Pointer) {
+            showHud(QStringLiteral("已返回游戏操作"));
+        }
+        if (m_mouseButton) {
+            QSignalBlocker blocker(m_mouseButton);
+            m_mouseButton->setChecked(false);
+        }
+        break;
+    case InputMode::Edit:
+        m_overlay->setGeometry(m_video->videoRect());
+        m_overlay->show();
+        m_overlay->raise();
+        m_overlay->setFocus();
+        if (m_floatingButtons) {
+            m_floatingButtons->hide();
+        }
+        break;
+    case InputMode::Idle:
+        if (m_mouseButton) {
+            QSignalBlocker blocker(m_mouseButton);
+            m_mouseButton->setChecked(false);
+        }
+        m_hud->hide();
+        if (m_floatingButtons) {
+            m_floatingButtons->hide();
+        }
+        break;
+    }
+
+    updateCursor();
+    updateInputCapture();
+}
+
+void ConsolePage::updateInputCapture() {
+    if (!m_session) {
+        return;
+    }
+    const bool streaming = m_session->state() == Session::State::Streaming;
+    const bool capture = m_active && streaming && m_mode == InputMode::Mapping;
+    m_session->setInputCaptureEnabled(capture);
+}
+
+void ConsolePage::updateCursor() {
+    if (!m_video) {
+        return;
+    }
+    if (m_mode == InputMode::Pointer || m_mode == InputMode::Edit) {
+        m_video->setCursor(Qt::ArrowCursor);
+    } else if (m_mode == InputMode::Mapping && m_gameMode) {
+        m_video->setCursor(Qt::BlankCursor);
+    } else {
+        m_video->unsetCursor();
+    }
+}
+
+void ConsolePage::enterPointerMode() {
+    if (!m_active) {
+        return;
+    }
+    if (m_mode == InputMode::Edit) {
+        showHud(QStringLiteral("键位编辑中，请先退出编辑"));
+        return;
+    }
+    if (!m_session || m_session->state() != Session::State::Streaming) {
+        showHud(QStringLiteral("未连接设备，无法呼出鼠标"));
+        return;
+    }
+    setInputMode(InputMode::Pointer);
+}
+
+void ConsolePage::exitPointerMode() {
+    if (m_mode == InputMode::Pointer) {
+        setInputMode(InputMode::Mapping);
+    }
+}
+
+void ConsolePage::setSummonKey(int vk) {
+    m_summonKey = vk;
+    updateSummonText();
+    if (m_mode == InputMode::Pointer) {
+        showHud(pointerHudText(), true);
+    }
+}
+
+void ConsolePage::setSummonMode(const QString &mode) {
+    const SummonMode next = mode == QStringLiteral("hold") ? SummonMode::Hold
+                                                           : SummonMode::LongPress;
+    if (m_summonMode == next) {
+        return;
+    }
+    m_summonMode = next;
+    m_summonHeld = false;
+    m_summonHoldTimer->stop();
+    updateSummonText();
+    if (m_mode == InputMode::Pointer) {
+        showHud(pointerHudText(), true);
+    }
+}
+
+void ConsolePage::onSummonKeyPressed(bool down) {
+    if (!m_active || m_mode == InputMode::Edit) {
+        return;
+    }
+    if (m_summonMode == SummonMode::Hold) {
+        if (down) {
+            if (m_mode != InputMode::Pointer) {
+                enterPointerMode();
+            }
+        } else if (m_mode == InputMode::Pointer) {
+            setInputMode(InputMode::Mapping);
+        }
+        return;
+    }
+
+    if (down) {
+        if (m_mode == InputMode::Pointer) {
+            setInputMode(InputMode::Mapping);
+            return;
+        }
+        m_summonHeld = true;
+        m_summonHoldTimer->start(m_summonHoldMs);
+    } else {
+        m_summonHeld = false;
+        m_summonHoldTimer->stop();
+    }
+}
+
+QSize ConsolePage::deviceSize() const {
+    const Session::Stats &stats = m_session->stats();
+    return {stats.videoWidth > 0 ? stats.videoWidth : 1080,
+            stats.videoHeight > 0 ? stats.videoHeight : 2400};
+}
+
+bool ConsolePage::mapToDevice(const QPoint &widgetPos, QPoint *devicePos) const {
+    const QRect rect = m_video->videoRect();
+    if (rect.isEmpty() || !rect.contains(widgetPos)) {
+        return false;
+    }
+    const QSize size = deviceSize();
+    const double nx = (widgetPos.x() - rect.x()) / static_cast<double>(rect.width());
+    const double ny = (widgetPos.y() - rect.y()) / static_cast<double>(rect.height());
+    *devicePos = {static_cast<int>(std::lround(nx * size.width())),
+                  static_cast<int>(std::lround(ny * size.height()))};
+    return true;
+}
+
+void ConsolePage::sendPointerTouch(int action, const QPoint &widgetPos, bool clampInside) {
+    QPoint pos = widgetPos;
+    const QRect rect = m_video->videoRect();
+    if (rect.isEmpty()) {
+        return;
+    }
+    if (clampInside) {
+        pos.setX(std::clamp(pos.x(), rect.left(), rect.right()));
+        pos.setY(std::clamp(pos.y(), rect.top(), rect.bottom()));
+    }
+    QPoint device;
+    if (!mapToDevice(pos, &device)) {
+        return;
+    }
+    const QSize size = deviceSize();
+    const auto touchAction = static_cast<proto::TouchAction>(action);
+    const bool up = touchAction == proto::TouchAction::Up;
+    const qint32 actionButton = up ? proto::ButtonNone : proto::ButtonPrimary;
+    const qint32 buttons = up ? proto::ButtonNone : proto::ButtonPrimary;
+    m_session->sendControlMessage(proto::touch(touchAction, 10, device.x(), device.y(),
+                                               size.width(), size.height(), 1.0f, actionButton,
+                                               buttons));
+}
+
+// ---------------------------------------------------------------------------
+// 键位编辑
+// ---------------------------------------------------------------------------
+void ConsolePage::beginKeymapEdit() { beginKeymapEditInternal(); }
+
+void ConsolePage::beginKeymapEditInternal() {
+    if (!m_active || !m_session) {
+        return;
+    }
+    if (m_mode == InputMode::Edit) {
+        m_overlay->setFocus();
+        return;
+    }
+    if (m_mode == InputMode::Pointer) {
+        setInputMode(InputMode::Mapping);
+    }
+
+    m_keymapProfile = m_session->profile();
+    m_keymapSelected = -1;
+    m_keymapDirty = false;
+
+    m_overlay->setProfile(m_keymapProfile);
+    m_overlay->setSelected(-1);
+    m_overlay->setGridEnabled(m_gridCheck->isChecked());
+    m_overlay->setSnapEnabled(m_snapCheck->isChecked());
+    m_overlay->setEmptyHint(m_video->hasFrame() ? QString()
+                                                : QStringLiteral("未连接投屏，坐标按比例编辑"));
+
+    refreshKeymapSummary();
+    refreshKeymapProperties();
+    updateKeymapOverlaps();
+    setKeymapEditUi(true);
+    switchInspectorTab(1);
+    setInputMode(InputMode::Edit);
+}
+
+void ConsolePage::exitKeymapEdit(bool save) {
+    if (m_mode != InputMode::Edit) {
+        setKeymapEditUi(false);
+        return;
+    }
+    stopKeyCapture();
+    if (save) {
+        saveKeymap();
+    }
+    m_overlay->hide();
+    m_keymapSelected = -1;
+    m_overlay->setSelected(-1);
+    m_keymapDirty = false;
+    setKeymapEditUi(false);
+    setInputMode(m_active && m_session->state() == Session::State::Streaming ? InputMode::Mapping
+                                                                            : InputMode::Idle);
+}
+
+bool ConsolePage::confirmLeaveEdit() {
+    if (!m_keymapDirty) {
+        return true;
+    }
+    QMessageBox box(QMessageBox::Question, QStringLiteral("未保存的键位"),
+                    QStringLiteral("当前键位有未保存的修改，如何处理？"), QMessageBox::NoButton,
+                    this);
+    auto *saveButton = box.addButton(QStringLiteral("保存"), QMessageBox::AcceptRole);
+    auto *discardButton = box.addButton(QStringLiteral("放弃"), QMessageBox::DestructiveRole);
+    box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    box.exec();
+    if (box.clickedButton() == saveButton) {
+        saveKeymap();
+        return true;
+    }
+    return box.clickedButton() == discardButton;
+}
+
+bool ConsolePage::switchInspectorTab(int index) {
+    if (!m_inspectorStack || index < 0 || index >= m_inspectorStack->count()) {
+        return true;
+    }
+    if (index == 0 && m_mode == InputMode::Edit) {
+        if (!confirmLeaveEdit()) {
+            return false;
+        }
+        exitKeymapEdit(false);
+    }
+    if (index == 0) {
+        refreshQualityAvailability();
+    }
+    {
+        QSignalBlocker blocker(m_tabs);
+        m_tabs->setCurrentIndex(index);
+    }
+    m_inspectorStack->setCurrentIndex(index);
+    return true;
+}
+
+void ConsolePage::setKeymapEditUi(bool editing) {
+    m_browseBox->setVisible(!editing);
+    m_editBox->setVisible(editing);
+    m_profileCombo->setEnabled(!editing);
+    m_newProfileButton->setEnabled(!editing);
+    m_importProfileButton->setEnabled(!editing);
+    m_exportProfileButton->setEnabled(!editing);
+    if (editing) {
+        refreshKeymapProperties();
+    }
+}
+
+void ConsolePage::reloadKeymapProfiles() {
+    if (!m_profileCombo) {
+        return;
+    }
+    QSignalBlocker blocker(m_profileCombo);
+    m_profileCombo->clear();
+    const QVector<Profile> profiles = m_session->profileStore().loadAll();
+    for (const Profile &profile : profiles) {
+        m_profileCombo->addItem(profile.name);
+    }
+    const int index = m_profileCombo->findText(m_keymapProfile.name);
+    if (index >= 0) {
+        m_profileCombo->setCurrentIndex(index);
+    }
+}
+
+void ConsolePage::loadKeymapProfile(const QString &name) {
+    if (m_mode == InputMode::Edit) {
+        return;
+    }
+    bool ok = false;
+    const Profile profile = m_session->profileStore().load(name, &ok);
+    if (!ok) {
+        return;
+    }
+    m_keymapProfile = profile;
+    m_keymapSelected = -1;
+    m_overlay->setSelected(-1);
+    m_overlay->setProfile(m_keymapProfile);
+    refreshKeymapSummary();
+    refreshKeymapProperties();
+    updateKeymapOverlaps();
+    m_session->applyProfile(m_keymapProfile, true);
+}
+
+void ConsolePage::createKeymapProfile() {
+    if (!m_session || !m_active || m_mode == InputMode::Edit) {
+        return;
+    }
+    bool ok = false;
+    QString name = QInputDialog::getText(
+        this, QStringLiteral("新建键位方案"),
+        QStringLiteral("方案名称（将复制当前方案的键位与参数）"), QLineEdit::Normal,
+        QStringLiteral("%1-副本").arg(m_keymapProfile.name), &ok);
+    name = name.trimmed();
+    if (!ok || name.isEmpty()) {
+        return;
+    }
+    const QString invalid = QStringLiteral("\\/:*?\"<>|");
+    for (const QChar &ch : invalid) {
+        if (name.contains(ch)) {
+            QMessageBox::warning(this, QStringLiteral("名称无效"),
+                                 QStringLiteral("方案名称不能包含 \\ / : * ? \" < > |"));
+            return;
+        }
+    }
+    const QVector<Profile> profiles = m_session->profileStore().loadAll();
+    for (const Profile &existing : profiles) {
+        if (existing.name == name) {
+            QMessageBox::warning(this, QStringLiteral("方案已存在"),
+                                 QStringLiteral("已存在同名方案「%1」，请更换名称。").arg(name));
+            return;
+        }
+    }
+
+    Profile profile = m_keymapProfile;
+    profile.name = name;
+    QString error;
+    if (!m_session->profileStore().save(profile, &error)) {
+        QMessageBox::warning(this, QStringLiteral("新建失败"), error);
+        return;
+    }
+    m_keymapProfile = profile;
+    m_session->applyProfile(profile, false);
+    reloadKeymapProfiles();
+    m_overlay->setProfile(m_keymapProfile);
+    refreshKeymapSummary();
+    refreshKeymapProperties();
+    updateKeymapOverlaps();
+    showHud(QStringLiteral("已新建方案：%1").arg(name));
+}
+
+void ConsolePage::importKeymapProfile() {
+    if (!m_session || !m_active || m_mode == InputMode::Edit) {
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("导入键位方案"), m_session->profileStore().directory(),
+        QStringLiteral("键位方案 (*.json)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    Profile imported;
+    QString error;
+    if (!m_session->profileStore().importFromFile(path, &imported, &error)) {
+        QMessageBox::warning(this, QStringLiteral("导入失败"), error);
+        return;
+    }
+    const QVector<Profile> profiles = m_session->profileStore().loadAll();
+    for (const Profile &existing : profiles) {
+        if (existing.name == imported.name) {
+            const auto answer = QMessageBox::question(
+                this, QStringLiteral("同名方案"),
+                QStringLiteral("已存在方案「%1」，是否覆盖？").arg(imported.name),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (answer != QMessageBox::Yes) {
+                return;
+            }
+            break;
+        }
+    }
+    if (!m_session->profileStore().save(imported, &error)) {
+        QMessageBox::warning(this, QStringLiteral("导入失败"), error);
+        return;
+    }
+    m_keymapProfile = imported;
+    m_session->applyProfile(imported, false);
+    reloadKeymapProfiles();
+    m_overlay->setProfile(m_keymapProfile);
+    refreshKeymapSummary();
+    refreshKeymapProperties();
+    updateKeymapOverlaps();
+    showHud(QStringLiteral("已导入方案：%1").arg(imported.name));
+}
+
+void ConsolePage::exportKeymapProfile() {
+    if (!m_session || !m_active || m_mode == InputMode::Edit) {
+        return;
+    }
+    const QString suggested =
+        QDir(m_session->profileStore().directory())
+            .filePath(ProfileStore::sanitizeFileName(m_keymapProfile.name) + QStringLiteral(".json"));
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("导出键位方案"), suggested, QStringLiteral("键位方案 (*.json)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    QString target = path;
+    if (!target.endsWith(QStringLiteral(".json"), Qt::CaseInsensitive)) {
+        target += QStringLiteral(".json");
+    }
+    QString error;
+    if (!m_session->profileStore().exportToFile(m_keymapProfile, target, &error)) {
+        QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+        return;
+    }
+    showHud(QStringLiteral("已导出方案：%1").arg(QFileInfo(target).fileName()));
+}
+
+void ConsolePage::refreshKeymapSummary() {
+    if (!m_keymapSummary) {
+        return;
+    }
+    m_keymapSummary->setText(
+        QStringLiteral("方案：%1\n摇杆半径 %2 · 死区 %3\n视角灵敏度 %4 · 校准 %5 计数/180°")
+            .arg(m_keymapProfile.name)
+            .arg(m_keymapProfile.joystickRadius, 0, 'f', 3)
+            .arg(m_keymapProfile.joystickDeadzone, 0, 'f', 2)
+            .arg(m_keymapProfile.lookSensitivity, 0, 'f', 2)
+            .arg(static_cast<int>(m_keymapProfile.lookCountsPer180)));
+}
+
+int ConsolePage::selectedBinding() const {
+    if (m_keymapSelected < 0 || m_keymapSelected >= m_keymapProfile.bindings.size()) {
+        return -1;
+    }
+    return m_keymapSelected;
+}
+
+void ConsolePage::refreshKeymapProperties() {
+    if (!m_keyCaptureButton) {
+        return;
+    }
+    const int index = selectedBinding();
+    const bool valid = index >= 0;
+    m_keyCaptureButton->setEnabled(valid);
+    m_xSpin->setEnabled(valid);
+    m_ySpin->setEnabled(valid);
+    m_sizeSlider->setEnabled(valid);
+    m_actionCombo->setEnabled(valid);
+    m_deleteBindingButton->setEnabled(valid);
+    if (!valid) {
+        m_keyCaptureButton->setText(QStringLiteral("--"));
+        return;
+    }
+    const KeyBinding &binding = m_keymapProfile.bindings.at(index);
+    m_keyCaptureButton->setText(m_capturingKey ? QStringLiteral("请按键…")
+                                               : vkName(binding.vk));
+    QSignalBlocker blockX(m_xSpin);
+    QSignalBlocker blockY(m_ySpin);
+    QSignalBlocker blockSize(m_sizeSlider);
+    QSignalBlocker blockAction(m_actionCombo);
+    m_xSpin->setValue(static_cast<int>(binding.center.x() * 1000));
+    m_ySpin->setValue(static_cast<int>(binding.center.y() * 1000));
+    m_sizeSlider->setValue(static_cast<int>(binding.radius * 1000));
+    m_actionCombo->setCurrentIndex(static_cast<int>(binding.action));
+}
+
+void ConsolePage::updateKeymapOverlaps() {
+    QVector<QPair<int, int>> overlaps;
+    QStringList details;
+    for (int i = 0; i < m_keymapProfile.bindings.size(); ++i) {
+        for (int j = i + 1; j < m_keymapProfile.bindings.size(); ++j) {
+            const KeyBinding &a = m_keymapProfile.bindings.at(i);
+            const KeyBinding &b = m_keymapProfile.bindings.at(j);
+            const double distance =
+                std::hypot(a.center.x() - b.center.x(), a.center.y() - b.center.y());
+            if (distance < a.radius + b.radius) {
+                overlaps.append({i, j});
+                details.append(QStringLiteral("%1 与 %2 重叠").arg(vkName(a.vk), vkName(b.vk)));
+            }
+        }
+    }
+    m_overlay->setOverlaps(overlaps);
+    if (overlaps.isEmpty()) {
+        m_overlapLabel->clear();
+    } else {
+        m_overlapLabel->setText(QStringLiteral("⚠ ") + details.join(QStringLiteral("；")));
+    }
+}
+
+void ConsolePage::markKeymapDirty() { m_keymapDirty = true; }
+
+void ConsolePage::saveKeymap() {
+    if (!m_session) {
+        return;
+    }
+    m_session->applyProfile(m_keymapProfile, true);
+    m_keymapDirty = false;
+    refreshKeymapSummary();
+    reloadKeymapProfiles();
+    showHud(QStringLiteral("键位方案已保存"));
+}
+
+void ConsolePage::addKeymapBinding() {
+    KeyBinding binding;
+    binding.vk = 0x47; // G
+    binding.action = BindingAction::Tap;
+    binding.center = QPointF(0.5, 0.5);
+    binding.radius = 0.045;
+    binding.slideTo = binding.center;
+    m_keymapProfile.bindings.append(binding);
+    m_keymapSelected = m_keymapProfile.bindings.size() - 1;
+    m_overlay->setProfile(m_keymapProfile);
+    m_overlay->setSelected(m_keymapSelected);
+    refreshKeymapProperties();
+    updateKeymapOverlaps();
+    markKeymapDirty();
+    startKeyCapture();
+}
+
+void ConsolePage::deleteKeymapBinding() {
+    const int index = selectedBinding();
+    if (index < 0) {
+        return;
+    }
+    m_keymapProfile.bindings.removeAt(index);
+    m_keymapSelected = -1;
+    m_overlay->setProfile(m_keymapProfile);
+    m_overlay->setSelected(-1);
+    refreshKeymapProperties();
+    updateKeymapOverlaps();
+    markKeymapDirty();
+}
+
+void ConsolePage::startKeyCapture() {
+    if (selectedBinding() < 0 || m_capturingKey) {
+        return;
+    }
+    m_capturingKey = true;
+    m_keyCaptureButton->setText(QStringLiteral("请按键…"));
+    qApp->installEventFilter(this);
+}
+
+void ConsolePage::stopKeyCapture() {
+    if (!m_capturingKey) {
+        return;
+    }
+    m_capturingKey = false;
+    qApp->removeEventFilter(this);
+    refreshKeymapProperties();
+}
+
+void ConsolePage::applyBindingFromUi() {
+    const int index = selectedBinding();
+    if (index < 0 || m_capturingKey) {
+        return;
+    }
+    KeyBinding &binding = m_keymapProfile.bindings[index];
+    binding.center = QPointF(m_xSpin->value() / 1000.0, m_ySpin->value() / 1000.0);
+    binding.radius = m_sizeSlider->value() / 1000.0;
+    static const BindingAction actions[] = {BindingAction::Tap, BindingAction::Hold,
+                                            BindingAction::Slide, BindingAction::Double};
+    binding.action = actions[std::clamp(m_actionCombo->currentIndex(), 0, 3)];
+    m_overlay->setProfile(m_keymapProfile);
+    updateKeymapOverlaps();
+    markKeymapDirty();
+}
+
+void ConsolePage::openCalibration() {
+    auto *dialog = new QDialog(this);
+    dialog->setWindowTitle(QStringLiteral("灵敏度校准"));
+    dialog->setMinimumWidth(460);
+    auto *layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(24, 20, 24, 20);
+    layout->setSpacing(12);
+
+    auto *step = new QLabel(QStringLiteral("步骤 2 / 4 · 180° 转身实测"), dialog);
+    step->setObjectName(QStringLiteral("SectionTitle"));
+    layout->addWidget(step);
+
+    auto *instruction = new QLabel(
+        QStringLiteral("在游戏内把视角对准一个明显参照物（如墙角），移动鼠标让角色正好转身 180°，"
+                       "然后点击「我已完成转身」。"),
+        dialog);
+    instruction->setWordWrap(true);
+    instruction->setProperty("variant", "caption");
+    layout->addWidget(instruction);
+
+    auto *reading = new QLabel(QStringLiteral("实测位移：0 计数"), dialog);
+    reading->setFont(Theme::monoFont(13));
+    layout->addWidget(reading);
+
+    auto *result = new QLabel(dialog);
+    result->setProperty("state", "success");
+    result->setWordWrap(true);
+    layout->addWidget(result);
+
+    auto *buttons = new QHBoxLayout();
+    auto *startButton = new QPushButton(QStringLiteral("开始测量"), dialog);
+    auto *finishButton = new QPushButton(QStringLiteral("我已完成转身"), dialog);
+    finishButton->setProperty("variant", "primary");
+    finishButton->setEnabled(false);
+    auto *closeButton = new QPushButton(QStringLiteral("关闭"), dialog);
+    buttons->addWidget(startButton);
+    buttons->addWidget(finishButton);
+    buttons->addStretch(1);
+    buttons->addWidget(closeButton);
+    layout->addLayout(buttons);
+
+    auto *timer = new QTimer(dialog);
+    timer->setInterval(100);
+
+    QObject::connect(startButton, &QPushButton::clicked, dialog, [=] {
+        m_session->beginCalibration();
+        startButton->setEnabled(false);
+        finishButton->setEnabled(true);
+        reading->setText(QStringLiteral("实测位移：测量中…"));
+    });
+
+    QObject::connect(finishButton, &QPushButton::clicked, dialog, [=] {
+        m_session->endCalibration();
+        finishButton->setEnabled(false);
+        timer->start();
+    });
+
+    QObject::connect(timer, &QTimer::timeout, dialog, [=] {
+        const qint64 counts = m_session->pollCalibratedCounts();
+        if (counts < 0) {
+            return;
+        }
+        timer->stop();
+        reading->setText(QStringLiteral("实测位移：%1 计数").arg(counts));
+
+        Profile profile = m_session->profile();
+        const double suggested = counts > 0 ? static_cast<double>(counts)
+                                            : profile.lookCountsPer180;
+        profile.lookCountsPer180 = suggested;
+        result->setText(
+            QStringLiteral("已写入方案：%1 计数 / 180°（可在键位编辑中继续微调）")
+                .arg(static_cast<int>(suggested)));
+        m_session->applyProfile(profile, true);
+        if (m_keymapProfile.name == profile.name) {
+            m_keymapProfile.lookCountsPer180 = suggested;
+            refreshKeymapSummary();
+        }
+        startButton->setEnabled(true);
+    });
+
+    QObject::connect(closeButton, &QPushButton::clicked, dialog, [dialog] {
+        dialog->reject();
+        dialog->deleteLater();
+    });
+    QObject::connect(dialog, &QDialog::rejected, dialog, &QObject::deleteLater);
+
+    dialog->show();
+}
+
+// ---------------------------------------------------------------------------
+// HUD / 提示
+// ---------------------------------------------------------------------------
+void ConsolePage::showHud(const QString &text, bool persistent) {
+    m_hud->setText(text);
+    m_hud->adjustSize();
+    m_hud->move(12, m_video->height() - m_hud->height() - 12);
+    m_hud->show();
+    m_hud->raise();
+    if (persistent) {
+        m_hudTimer->stop();
+    } else {
+        hideHudSoon();
+    }
+}
+
+void ConsolePage::hideHudSoon() { m_hudTimer->start(3000); }
+
+void ConsolePage::showSummonHint() {
+    if (!m_summonHint || m_summonHintShown) {
+        return;
+    }
+    m_summonHintShown = true;
+    updateSummonText();
+    m_summonHint->adjustSize();
+    layoutVideoOverlays();
+    m_summonHint->show();
+    m_summonHint->raise();
+    m_summonHintTimer->start(5000);
+}
+
+QString ConsolePage::pointerHudText() const {
+    if (m_summonMode == SummonMode::Hold) {
+        return QStringLiteral("鼠标模式 · 松开 %1 返回游戏").arg(vkName(m_summonKey));
+    }
+    return QStringLiteral("鼠标模式 · 点击手机画面操作 · %1 返回").arg(vkName(m_summonKey));
+}
+
+void ConsolePage::updateSummonText() {
+    if (!m_summonHint) {
+        return;
+    }
+    const QString action =
+        m_summonMode == SummonMode::Hold ? QStringLiteral("按住") : QStringLiteral("长按");
+    m_summonHint->setText(QStringLiteral("%1 %2呼出鼠标").arg(action, vkName(m_summonKey)));
+    m_summonHint->adjustSize();
+}
+
+// ---------------------------------------------------------------------------
+// 事件
+// ---------------------------------------------------------------------------
+bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
+    // 按键捕获优先（qApp 级过滤器，watched 为任意对象）
+    if (m_capturingKey) {
+        if (event->type() == QEvent::KeyPress) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (keyEvent->key() == Qt::Key_Escape) {
+                stopKeyCapture();
+                return true;
+            }
+            if (!keyEvent->isAutoRepeat() && selectedBinding() >= 0) {
+                m_keymapProfile.bindings[m_keymapSelected].vk = vkFromKeyEvent(*keyEvent);
+                m_capturingKey = false;
+                qApp->removeEventFilter(this);
+                m_overlay->setProfile(m_keymapProfile);
+                refreshKeymapProperties();
+                updateKeymapOverlaps();
+                markKeymapDirty();
+                return true;
+            }
+            return true;
+        }
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto *mouseEvent = static_cast<QMouseEvent *>(event);
+            int vk = 0;
+            if (mouseEvent->button() == Qt::LeftButton) {
+                vk = 0x01;
+            } else if (mouseEvent->button() == Qt::RightButton) {
+                vk = 0x02;
+            } else if (mouseEvent->button() == Qt::MiddleButton) {
+                vk = 0x04;
+            }
+            if (vk && selectedBinding() >= 0) {
+                m_keymapProfile.bindings[m_keymapSelected].vk = vk;
+                m_capturingKey = false;
+                qApp->removeEventFilter(this);
+                m_overlay->setProfile(m_keymapProfile);
+                refreshKeymapProperties();
+                updateKeymapOverlaps();
+                markKeymapDirty();
+                return true;
+            }
+        }
+    }
+
+    if (watched == m_qualityPanel && event->type() == QEvent::MouseButtonPress &&
+        !LicenseManager::instance().isPro()) {
+        QMessageBox::information(
+            this, QStringLiteral("Pro 功能"),
+            QStringLiteral("画面增强为 Pro 功能，激活后解锁。可在「设置 → 激活 Pro」中输入激活码。"));
+        return true;
+    }
+
+    if (watched == m_video) {
+        if (event->type() == QEvent::Resize) {
+            layoutVideoOverlays();
+        } else if (event->type() == QEvent::Enter) {
+            if (!m_gameMode && m_mode != InputMode::Edit && m_floatingButtons) {
+                m_floatingButtons->show();
+                m_floatingButtons->raise();
+            }
+        } else if (event->type() == QEvent::Leave) {
+            if (m_mode != InputMode::Pointer && m_mode != InputMode::Edit && !m_gameMode &&
+                m_floatingButtons) {
+                m_floatingButtons->hide();
+            }
+        } else if (event->type() == QEvent::KeyPress && m_mode == InputMode::Pointer) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (keyEvent->key() == Qt::Key_Escape) {
+                setInputMode(InputMode::Mapping);
+                return true;
+            }
+            const int vk = vkFromKeyEvent(*keyEvent);
+            if (vk && vkMatchesSummon(vk, m_summonKey) && !keyEvent->isAutoRepeat()) {
+                if (m_summonMode == SummonMode::LongPress) {
+                    setInputMode(InputMode::Mapping);
+                }
+                return true;
+            }
+        } else if (event->type() == QEvent::KeyRelease && m_mode == InputMode::Pointer) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            const int vk = vkFromKeyEvent(*keyEvent);
+            if (vk && vkMatchesSummon(vk, m_summonKey) && !keyEvent->isAutoRepeat()) {
+                if (m_summonMode == SummonMode::Hold) {
+                    setInputMode(InputMode::Mapping);
+                }
+                return true;
+            }
+        } else if (event->type() == QEvent::Wheel) {
+            auto *wheelEvent = static_cast<QWheelEvent *>(event);
+            const QPoint pos = wheelEvent->position().toPoint();
+            const int delta = wheelEvent->angleDelta().y() > 0 ? 1 : -1;
+            if (delta == 0) {
+                return true;
+            }
+            if (m_mode == InputMode::Pointer) {
+                const QRect rect = m_video->videoRect();
+                QPoint clamped = pos;
+                clamped.setX(std::clamp(clamped.x(), rect.left(), rect.right()));
+                clamped.setY(std::clamp(clamped.y(), rect.top(), rect.bottom()));
+                QPoint device;
+                if (mapToDevice(rect.contains(pos) ? pos : clamped, &device)) {
+                    const QSize size = deviceSize();
+                    m_session->sendControlMessage(proto::scroll(
+                        device.x(), device.y(), size.width(), size.height(), 0.0f,
+                        static_cast<float>(delta)));
+                }
+                return true;
+            }
+            if (m_mode == InputMode::Mapping) {
+                const QRect rect = m_video->videoRect();
+                if (m_gameMode || rect.contains(pos)) {
+                    InputEvent wheel;
+                    wheel.type = InputEventType::Wheel;
+                    wheel.dx = delta;
+                    m_session->postInputEvent(wheel);
+                }
+                return true;
+            }
+            return true;
+        } else if (m_mode == InputMode::Pointer &&
+                   event->type() == QEvent::MouseButtonPress) {
+            auto *mouseEvent = static_cast<QMouseEvent *>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                const QRect rect = m_video->videoRect();
+                m_draggingTouch = rect.contains(mouseEvent->pos());
+                if (m_draggingTouch) {
+                    sendPointerTouch(static_cast<int>(proto::TouchAction::Down),
+                                     mouseEvent->pos(), false);
+                }
+                return true;
+            }
+            if (mouseEvent->button() == Qt::MiddleButton ||
+                mouseEvent->button() == Qt::RightButton) {
+                const int vk = mouseEvent->button() == Qt::MiddleButton ? 0x04 : 0x02;
+                if (m_summonMode == SummonMode::LongPress &&
+                    vkMatchesSummon(vk, m_summonKey)) {
+                    setInputMode(InputMode::Mapping);
+                }
+                return true;
+            }
+        } else if (m_mode == InputMode::Pointer && event->type() == QEvent::MouseMove &&
+                   m_draggingTouch) {
+            auto *mouseEvent = static_cast<QMouseEvent *>(event);
+            sendPointerTouch(static_cast<int>(proto::TouchAction::Move), mouseEvent->pos(), true);
+            return true;
+        } else if (m_mode == InputMode::Pointer &&
+                   event->type() == QEvent::MouseButtonRelease) {
+            auto *mouseEvent = static_cast<QMouseEvent *>(event);
+            if (mouseEvent->button() == Qt::LeftButton && m_draggingTouch) {
+                sendPointerTouch(static_cast<int>(proto::TouchAction::Up), mouseEvent->pos(), true);
+                m_draggingTouch = false;
+                return true;
+            }
+            if (m_summonMode == SummonMode::Hold &&
+                (mouseEvent->button() == Qt::MiddleButton ||
+                 mouseEvent->button() == Qt::RightButton)) {
+                const int vk = mouseEvent->button() == Qt::MiddleButton ? 0x04 : 0x02;
+                if (vkMatchesSummon(vk, m_summonKey)) {
+                    setInputMode(InputMode::Mapping);
+                }
+                return true;
+            }
+        }
+    }
+
+    return QWidget::eventFilter(watched, event);
+}
+
+void ConsolePage::resizeEvent(QResizeEvent *event) {
+    QWidget::resizeEvent(event);
+    if (m_inspector) {
+        m_inspector->setFixedWidth(width() < 1100 ? 280 : 320);
+    }
+    layoutVideoOverlays();
+}
+
+void ConsolePage::setGameMode(bool enabled) {
+    if (m_gameMode == enabled) {
+        return;
+    }
+    m_gameMode = enabled;
+    if (m_toolbar) {
+        m_toolbar->setVisible(!enabled);
+    }
+    if (m_inspector) {
+        m_inspector->setVisible(!enabled);
+    }
+    if (m_statusBar) {
+        m_statusBar->setVisible(!enabled);
+    }
+
+    if (enabled) {
+        if (m_floatingButtons) {
+            m_floatingButtons->hide();
+        }
+        m_video->setFocus();
+        if (m_mode == InputMode::Mapping) {
+            const QString action = m_summonMode == SummonMode::Hold ? QStringLiteral("按住")
+                                                                    : QStringLiteral("长按");
+            showHud(QStringLiteral("%1 %2 呼出鼠标 · F11 退出全屏")
+                        .arg(action, vkName(m_summonKey)));
+        }
+    } else {
+        if (m_mode == InputMode::Pointer) {
+            setInputMode(InputMode::Mapping);
+        }
+        m_hud->hide();
+    }
+    updateCursor();
+    layoutVideoOverlays();
+}
+
+void ConsolePage::setBypassEnhance(bool bypass) { m_video->setBypassEnhance(bypass); }
+
+} // namespace ks::ui
