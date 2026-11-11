@@ -92,6 +92,16 @@ void InjectionThread::setScreenSize(int width, int height) {
 
 void InjectionThread::setIgnoredKey(int vk) { m_ignoredKey.store(vk); }
 
+void InjectionThread::setDirectTouchEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_directTouch = enabled;
+}
+
+void InjectionThread::setTouchDragActive(bool active) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_touchDrag = active;
+}
+
 void InjectionThread::sendMessage(const QByteArray &message) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_outbox.append(message);
@@ -157,6 +167,8 @@ void InjectionThread::loop() {
     bool hasProfile = false;
     int screenWidth = m_screenWidth;
     int screenHeight = m_screenHeight;
+    bool directTouch = false;
+    bool touchDrag = false;
 
     qint64 previous = qpcNow();
     double accumulator = 0.0;
@@ -196,7 +208,12 @@ void InjectionThread::loop() {
                 m_pendingScreenHeight = 0;
                 m_engine.setScreenSize(screenWidth, screenHeight);
             }
+            directTouch = m_directTouch;
+            touchDrag = m_touchDrag;
         }
+
+        m_engine.setDirectTouchEnabled(directTouch);
+        m_engine.setTouchDragActive(touchDrag);
 
         if (hasProfile) {
             m_engine.setProfile(profile);

@@ -63,11 +63,6 @@ QJsonObject profileToJson(const Profile &profile) {
     look.insert(QStringLiteral("countsPer180"), profile.lookCountsPer180);
     obj.insert(QStringLiteral("look"), look);
 
-    QJsonObject humanizer;
-    humanizer.insert(QStringLiteral("enabled"), profile.humanizerEnabled);
-    humanizer.insert(QStringLiteral("pro"), profile.proHumanizer);
-    obj.insert(QStringLiteral("humanizer"), humanizer);
-
     QJsonObject enhance;
     enhance.insert(QStringLiteral("brightness"), profile.brightness);
     enhance.insert(QStringLiteral("contrast"), profile.contrast);
@@ -115,10 +110,6 @@ Profile profileFromJson(const QJsonObject &obj) {
     profile.lookRadius = look.value(QStringLiteral("radius")).toDouble(0.23);
     profile.lookSensitivity = look.value(QStringLiteral("sensitivity")).toDouble(1.0);
     profile.lookCountsPer180 = look.value(QStringLiteral("countsPer180")).toDouble(3000.0);
-
-    const QJsonObject humanizer = obj.value(QStringLiteral("humanizer")).toObject();
-    profile.humanizerEnabled = humanizer.value(QStringLiteral("enabled")).toBool(true);
-    profile.proHumanizer = humanizer.value(QStringLiteral("pro")).toBool(false);
 
     const QJsonObject enhance = obj.value(QStringLiteral("enhance")).toObject();
     profile.brightness = enhance.value(QStringLiteral("brightness")).toDouble(0.0);

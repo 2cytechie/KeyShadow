@@ -9,6 +9,7 @@
 
 #include "core/scrcpy/Protocol.h"
 #include "core/video/VideoFrame.h"
+#include "license/LicenseManager.h"
 
 #include <QDebug>
 
@@ -289,7 +290,14 @@ void Session::reloadProfiles() {
     for (const Profile &profile : profiles) {
         m_profileNames.append(profile.name);
     }
-    if (!m_profileNames.contains(m_profile.name)) {
+    const QString lastName = QSettings().value(QStringLiteral("profile/lastName")).toString();
+    if (m_profileNames.contains(lastName)) {
+        bool ok = false;
+        const Profile loaded = m_store.load(lastName, &ok);
+        if (ok) {
+            m_profile = loaded;
+        }
+    } else if (!m_profileNames.contains(m_profile.name)) {
         m_profile = profiles.first();
     }
     applyProfile(m_profile, false);
@@ -297,7 +305,13 @@ void Session::reloadProfiles() {
 
 void Session::applyProfile(const Profile &profile, bool persist) {
     m_profile = profile;
-    m_injection.setProfile(m_profile);
+    // 拟人化为 Pro 自动能力：不读取方案偏好，注入侧按授权统一决定。
+    Profile injected = m_profile;
+    const bool pro = LicenseManager::instance().isPro();
+    injected.humanizerEnabled = pro;
+    injected.proHumanizer = pro;
+    m_injection.setProfile(injected);
+    QSettings().setValue(QStringLiteral("profile/lastName"), m_profile.name);
     if (persist) {
         QString error;
         if (!m_store.save(m_profile, &error)) {
@@ -356,6 +370,20 @@ void Session::setInputCaptureEnabled(bool enabled) {
 bool Session::inputCaptureEnabled() const {
     return m_rawInput && m_rawInput->isEnabled();
 }
+
+void Session::setDirectTouchEnabled(bool enabled) {
+    if (m_directTouchEnabled == enabled) {
+        return;
+    }
+    m_directTouchEnabled = enabled;
+    m_injection.setDirectTouchEnabled(enabled);
+    if (enabled) {
+        // 进入直操前释放可能已按下的映射动作（如左键 Hold），避免手机端触点卡住。
+        m_injection.releaseAll();
+    }
+}
+
+void Session::setTouchDragActive(bool active) { m_injection.setTouchDragActive(active); }
 
 void Session::setScreenOff(bool off) {
     m_screenOff = off;

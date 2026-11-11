@@ -38,6 +38,11 @@ void KeymapOverlay::setSelected(int index) {
     update();
 }
 
+void KeymapOverlay::setSelectedRegion(Region region) {
+    m_selectedRegion = region;
+    update();
+}
+
 void KeymapOverlay::setGridEnabled(bool enabled) {
     m_grid = enabled;
     update();
@@ -45,11 +50,6 @@ void KeymapOverlay::setGridEnabled(bool enabled) {
 
 void KeymapOverlay::setSnapEnabled(bool enabled) {
     m_snap = enabled;
-    update();
-}
-
-void KeymapOverlay::setOverlaps(const QVector<QPair<int, int>> &pairs) {
-    m_overlaps = pairs;
     update();
 }
 
@@ -83,6 +83,51 @@ int KeymapOverlay::hitTest(const QPoint &pos) const {
     return -1;
 }
 
+int KeymapOverlay::hitTestRegion(const QPoint &pos) const {
+    const QPointF joystick = toWidget(m_profile.joystickCenter);
+    const double joystickRadius = std::max(12.0, pixelRadius(m_profile.joystickRadius));
+    if (QLineF(joystick, pos).length() <= joystickRadius) {
+        return static_cast<int>(Region::Joystick);
+    }
+    const QPointF look = toWidget(m_profile.lookCenter);
+    const double rx = m_profile.lookRadius * width();
+    const double ry = m_profile.lookRadius * height();
+    if (rx > 0.0 && ry > 0.0) {
+        const double dx = (pos.x() - look.x()) / rx;
+        const double dy = (pos.y() - look.y()) / ry;
+        if (dx * dx + dy * dy <= 1.0) {
+            return static_cast<int>(Region::Look);
+        }
+    }
+    return static_cast<int>(Region::None);
+}
+
+QPointF KeymapOverlay::regionCenter(int region) const {
+    return region == static_cast<int>(Region::Look) ? m_profile.lookCenter
+                                                    : m_profile.joystickCenter;
+}
+
+double KeymapOverlay::regionRadius(int region) const {
+    return region == static_cast<int>(Region::Look) ? m_profile.lookRadius
+                                                    : m_profile.joystickRadius;
+}
+
+void KeymapOverlay::setRegionCenter(int region, const QPointF &normalized) {
+    if (region == static_cast<int>(Region::Look)) {
+        m_profile.lookCenter = normalized;
+    } else if (region == static_cast<int>(Region::Joystick)) {
+        m_profile.joystickCenter = normalized;
+    }
+}
+
+void KeymapOverlay::setRegionRadius(int region, double radius) {
+    if (region == static_cast<int>(Region::Look)) {
+        m_profile.lookRadius = std::clamp(radius, 0.05, 0.45);
+    } else if (region == static_cast<int>(Region::Joystick)) {
+        m_profile.joystickRadius = std::clamp(radius, 0.02, 0.30);
+    }
+}
+
 void KeymapOverlay::paintEvent(QPaintEvent *event) {
     (void)event;
     QPainter painter(this);
@@ -108,12 +153,14 @@ void KeymapOverlay::paintEvent(QPaintEvent *event) {
     const QPointF lookCenter = toWidget(m_profile.lookCenter);
     const double lookRx = m_profile.lookRadius * width();
     const double lookRy = m_profile.lookRadius * height();
+    const bool lookSelected = m_selectedRegion == Region::Look;
     QColor info = Theme::color(QStringLiteral("state-info"));
     QColor infoStroke = info;
-    infoStroke.setAlpha(170);
+    infoStroke.setAlpha(lookSelected ? 255 : 170);
     QColor infoFill = info;
-    infoFill.setAlpha(24);
-    painter.setPen(QPen(infoStroke, 1, Qt::DashLine));
+    infoFill.setAlpha(lookSelected ? 40 : 24);
+    painter.setPen(QPen(infoStroke, lookSelected ? 2.5 : 1,
+                        lookSelected ? Qt::SolidLine : Qt::DashLine));
     painter.setBrush(infoFill);
     painter.drawEllipse(lookCenter, lookRx, lookRy);
     painter.setPen(infoStroke);
@@ -123,10 +170,13 @@ void KeymapOverlay::paintEvent(QPaintEvent *event) {
     // 摇杆
     const QPointF joystickCenter = toWidget(m_profile.joystickCenter);
     const double joystickRadius = pixelRadius(m_profile.joystickRadius);
-    QColor joystickStroke = Theme::color(QStringLiteral("border-strong"));
-    painter.setPen(QPen(joystickStroke, 1, Qt::DashLine));
+    const bool joystickSelected = m_selectedRegion == Region::Joystick;
+    QColor joystickStroke =
+        joystickSelected ? Theme::brandPrimary() : Theme::color(QStringLiteral("border-strong"));
+    painter.setPen(QPen(joystickStroke, joystickSelected ? 2.5 : 1,
+                        joystickSelected ? Qt::SolidLine : Qt::DashLine));
     QColor joystickFill = Theme::brandPrimary();
-    joystickFill.setAlpha(18);
+    joystickFill.setAlpha(joystickSelected ? 40 : 18);
     painter.setBrush(joystickFill);
     painter.drawEllipse(joystickCenter, joystickRadius, joystickRadius);
     painter.setPen(QPen(Theme::brandPrimary(), 1.5));
@@ -146,28 +196,13 @@ void KeymapOverlay::paintEvent(QPaintEvent *event) {
         const QPointF center = toWidget(binding.center);
         const double radius = pixelRadius(binding.radius);
 
-        bool overlapping = false;
-        for (const QPair<int, int> &pair : m_overlaps) {
-            if (pair.first == i || pair.second == i) {
-                overlapping = true;
-                break;
-            }
-        }
-
         QColor stroke = Theme::brandPrimary();
         stroke.setAlpha(200);
-        if (overlapping) {
-            stroke = Theme::stateWarning();
-        }
-        if (i == m_selected) {
-            stroke = Theme::brandPrimary();
-        }
         QColor fill = Theme::brandPrimary();
         fill.setAlpha(i == m_selected ? 44 : 24);
 
         painter.setBrush(fill);
-        painter.setPen(QPen(stroke, i == m_selected ? 2.5 : 2.0,
-                            overlapping ? Qt::DashLine : Qt::SolidLine));
+        painter.setPen(QPen(stroke, i == m_selected ? 2.5 : 2.0, Qt::SolidLine));
         painter.drawEllipse(center, radius, radius);
 
         const QRectF textRect(center.x() - radius, center.y() - radius, radius * 2, radius * 2);
@@ -219,28 +254,74 @@ void KeymapOverlay::mousePressEvent(QMouseEvent *event) {
     }
     setFocus(Qt::MouseFocusReason);
     const int index = hitTest(event->pos());
-    m_selected = index;
-    m_dragging = index >= 0;
-    if (m_dragging) {
+    if (index >= 0) {
+        m_selected = index;
+        m_selectedRegion = Region::None;
+        m_draggingRegion = false;
+        m_dragging = true;
         m_dragOffset = toWidget(m_profile.bindings.at(index).center) - event->pos();
+        update();
+        emit selectedChanged(index);
+        return;
+    }
+
+    const int region = hitTestRegion(event->pos());
+    m_selected = -1;
+    m_dragging = false;
+    m_selectedRegion = static_cast<Region>(region);
+    m_draggingRegion = region != static_cast<int>(Region::None);
+    if (m_draggingRegion) {
+        m_regionDragOffset = regionCenter(region) - toNormalized(event->pos());
     }
     update();
-    emit selectedChanged(index);
+    emit selectedChanged(-1);
+    emit regionSelected(region);
 }
 
 void KeymapOverlay::mouseMoveEvent(QMouseEvent *event) {
-    if (!m_dragging || m_selected < 0 || m_selected >= m_profile.bindings.size()) {
+    if (m_dragging) {
+        if (m_selected < 0 || m_selected >= m_profile.bindings.size()) {
+            return;
+        }
+        const QPoint target = event->pos() + m_dragOffset.toPoint();
+        m_profile.bindings[m_selected].center = toNormalized(target);
+        update();
+        emit bindingMoved(m_selected);
         return;
     }
-    const QPoint target = event->pos() + m_dragOffset.toPoint();
-    m_profile.bindings[m_selected].center = toNormalized(target);
+    if (!m_draggingRegion || m_selectedRegion == Region::None) {
+        return;
+    }
+    const int region = static_cast<int>(m_selectedRegion);
+    QPointF center = toNormalized(event->pos()) + m_regionDragOffset;
+    center.setX(std::clamp(center.x(), 0.0, 1.0));
+    center.setY(std::clamp(center.y(), 0.0, 1.0));
+    setRegionCenter(region, center);
     update();
-    emit bindingMoved(m_selected);
+    emit regionMoved(region);
 }
 
 void KeymapOverlay::mouseReleaseEvent(QMouseEvent *event) {
-    if (event->button() != Qt::LeftButton || !m_dragging) {
-        m_dragging = false;
+    if (event->button() != Qt::LeftButton) {
+        return;
+    }
+    if (m_draggingRegion && m_selectedRegion != Region::None) {
+        m_draggingRegion = false;
+        const int region = static_cast<int>(m_selectedRegion);
+        QPointF center = regionCenter(region);
+        if (m_snap) {
+            center.setX(std::round(center.x() * 32.0) / 32.0);
+            center.setY(std::round(center.y() * 32.0) / 32.0);
+        }
+        center.setX(std::clamp(center.x(), 0.0, 1.0));
+        center.setY(std::clamp(center.y(), 0.0, 1.0));
+        setRegionCenter(region, center);
+        update();
+        emit regionMoved(region);
+        emit regionEdited();
+        return;
+    }
+    if (!m_dragging) {
         return;
     }
     m_dragging = false;
@@ -260,6 +341,16 @@ void KeymapOverlay::mouseReleaseEvent(QMouseEvent *event) {
 }
 
 void KeymapOverlay::wheelEvent(QWheelEvent *event) {
+    if (m_selectedRegion != Region::None) {
+        const int region = static_cast<int>(m_selectedRegion);
+        const double steps = event->angleDelta().y() / 120.0;
+        setRegionRadius(region, regionRadius(region) + steps * 0.005);
+        update();
+        emit regionResized(region);
+        emit regionEdited();
+        event->accept();
+        return;
+    }
     if (m_selected < 0 || m_selected >= m_profile.bindings.size()) {
         event->ignore();
         return;

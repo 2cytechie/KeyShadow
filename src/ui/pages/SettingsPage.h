@@ -4,6 +4,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QButtonGroup;
 class QLabel;
 class QPushButton;
 class QShowEvent;
@@ -48,10 +49,12 @@ private:
     QComboBox *m_bitrateCombo = nullptr;
     QCheckBox *m_audioCheck = nullptr;
     QCheckBox *m_screenOffCheck = nullptr;
-    QCheckBox *m_humanizerCheck = nullptr;
+    QLabel *m_humanizerStatus = nullptr;
     QLabel *m_licenseLabel = nullptr;
     QPushButton *m_summonButton = nullptr;
-    QComboBox *m_summonModeCombo = nullptr;
+    QPushButton *m_summonModeLongPress = nullptr;
+    QPushButton *m_summonModeHold = nullptr;
+    QButtonGroup *m_summonModeGroup = nullptr;
     QLabel *m_summonModeHint = nullptr;
     QLabel *m_summonStatus = nullptr;
     QTimer *m_summonTimer = nullptr;

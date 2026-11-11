@@ -6,6 +6,7 @@
 #include "ui/Theme.h"
 
 #include <QApplication>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFormLayout>
@@ -99,18 +100,34 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     summonLayout->addStretch(1);
     addRow(inputSection, QStringLiteral("呼出鼠标"), summonRow);
 
-    m_summonModeCombo = new QComboBox(inputSection);
-    m_summonModeCombo->addItem(QStringLiteral("长按 300ms 呼出"), QStringLiteral("longPress"));
-    m_summonModeCombo->addItem(QStringLiteral("按下呼出，抬起返回"), QStringLiteral("hold"));
-    addRow(inputSection, QStringLiteral("呼出方式"), m_summonModeCombo);
+    auto *modeRow = new QWidget(inputSection);
+    auto *modeLayout = new QHBoxLayout(modeRow);
+    modeLayout->setContentsMargins(0, 0, 0, 0);
+    modeLayout->setSpacing(8);
+    m_summonModeLongPress = new QPushButton(QStringLiteral("长按 300ms 呼出"), modeRow);
+    m_summonModeHold = new QPushButton(QStringLiteral("按下呼出 · 抬起返回"), modeRow);
+    m_summonModeGroup = new QButtonGroup(this);
+    m_summonModeGroup->setExclusive(true);
+    for (QPushButton *button : {m_summonModeLongPress, m_summonModeHold}) {
+        button->setCheckable(true);
+        button->setProperty("role", "option");
+        button->setFixedHeight(34);
+        button->setCursor(Qt::PointingHandCursor);
+        m_summonModeGroup->addButton(button);
+        modeLayout->addWidget(button);
+    }
+    modeLayout->addStretch(1);
+    addRow(inputSection, QStringLiteral("呼出方式"), modeRow);
 
     m_summonStatus = new QLabel(inputSection);
     m_summonStatus->setProperty("state", "warning");
     m_summonStatus->setWordWrap(true);
     addRow(inputSection, QString(), m_summonStatus);
 
-    m_humanizerCheck = new QCheckBox(QStringLiteral("开启触控拟人化"), inputSection);
-    addRow(inputSection, QStringLiteral("拟人化"), m_humanizerCheck);
+    m_humanizerStatus = new QLabel(inputSection);
+    m_humanizerStatus->setProperty("variant", "micro");
+    m_humanizerStatus->setWordWrap(true);
+    addRow(inputSection, QStringLiteral("拟人化"), m_humanizerStatus);
 
     auto *warning = new QLabel(
         QStringLiteral("风险提示：使用第三方触控工具可能被游戏安全系统识别。拟人化仅降低行为特征风险，"
@@ -187,14 +204,6 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
         m_session->setScreenOff(checked);
         storeProfile();
     });
-    connect(m_humanizerCheck, &QCheckBox::toggled, this, [this](bool checked) {
-        if (m_syncing) {
-            return;
-        }
-        Profile profile = m_session->profile();
-        profile.humanizerEnabled = checked;
-        m_session->applyProfile(profile, true);
-    });
     connect(activateButton, &QPushButton::clicked, this, [this] {
         bool ok = false;
         const QString code = QInputDialog::getText(
@@ -209,23 +218,35 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
             return;
         }
         syncFromProfile();
+        if (m_session) {
+            // 激活后按新授权重算注入侧的拟人化开关，无需用户再操作。
+            m_session->applyProfile(m_session->profile(), false);
+        }
     });
 
     QSettings settings;
     m_summonKey = settings.value(QStringLiteral("input/summonKey"), 0x12).toInt();
-    m_summonModeCombo->setCurrentIndex(
+    const bool holdMode =
         settings.value(QStringLiteral("input/summonMode"), QStringLiteral("longPress"))
-                    .toString() == QStringLiteral("hold")
-            ? 1
-            : 0);
+            .toString() == QStringLiteral("hold");
+    (holdMode ? m_summonModeHold : m_summonModeLongPress)->setChecked(true);
     updateSummonModeHint();
-    connect(m_summonModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            [this](int) {
-                const QString mode = m_summonModeCombo->currentData().toString();
-                QSettings().setValue(QStringLiteral("input/summonMode"), mode);
-                updateSummonModeHint();
-                emit summonModeChanged(mode);
-            });
+    connect(m_summonModeLongPress, &QPushButton::toggled, this, [this](bool checked) {
+        if (!checked || m_syncing) {
+            return;
+        }
+        QSettings().setValue(QStringLiteral("input/summonMode"), QStringLiteral("longPress"));
+        updateSummonModeHint();
+        emit summonModeChanged(QStringLiteral("longPress"));
+    });
+    connect(m_summonModeHold, &QPushButton::toggled, this, [this](bool checked) {
+        if (!checked || m_syncing) {
+            return;
+        }
+        QSettings().setValue(QStringLiteral("input/summonMode"), QStringLiteral("hold"));
+        updateSummonModeHint();
+        emit summonModeChanged(QStringLiteral("hold"));
+    });
     m_summonTimer = new QTimer(this);
     m_summonTimer->setSingleShot(true);
     m_summonTimer->setInterval(5000);
@@ -251,12 +272,12 @@ void SettingsPage::refreshSummonButton() {
 }
 
 void SettingsPage::updateSummonModeHint() {
-    if (!m_summonModeHint || !m_summonModeCombo) {
+    if (!m_summonModeHint || !m_summonModeHold) {
         return;
     }
-    const bool hold = m_summonModeCombo->currentData().toString() == QStringLiteral("hold");
-    m_summonModeHint->setText(hold ? QStringLiteral("按住呼出，松开返回")
-                                   : QStringLiteral("长按 300ms 呼出"));
+    m_summonModeHint->setText(m_summonModeHold->isChecked()
+                                  ? QStringLiteral("按住呼出，松开返回")
+                                  : QStringLiteral("长按 300ms 呼出"));
 }
 
 void SettingsPage::startSummonListen() {
@@ -396,9 +417,12 @@ void SettingsPage::syncFromProfile() {
                                                                                : 4);
     m_audioCheck->setChecked(profile.audioEnabled);
     m_screenOffCheck->setChecked(profile.screenOff);
-    m_humanizerCheck->setChecked(profile.humanizerEnabled);
 
     const bool pro = LicenseManager::instance().isPro();
+    if (m_humanizerStatus) {
+        m_humanizerStatus->setText(pro ? QStringLiteral("Pro 自动开启（触控抖动与随机时序）")
+                                       : QStringLiteral("基础版固定时序，Pro 自动开启"));
+    }
     m_licenseLabel->setText(pro ? QStringLiteral("PRO · 永久有效")
                                 : QStringLiteral("基础版 · 功能不受限时可正常游玩"));
     m_licenseLabel->setProperty("state", pro ? "success" : "secondary");

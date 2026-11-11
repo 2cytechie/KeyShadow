@@ -37,6 +37,9 @@ public:
     void setProfile(const Profile &profile);
     void setScreenSize(int width, int height);
     void setIgnoredKey(int vk);
+    /// 窗口态直操：屏蔽 Raw Input 左键映射与拖动期视角注入。
+    void setDirectTouchEnabled(bool enabled);
+    void setTouchDragActive(bool active);
     void sendMessage(const QByteArray &message);
     void releaseAll();
 
@@ -67,6 +70,8 @@ private:
     int m_pendingScreenHeight = 0;
     bool m_calibrationDone = false;
     qint64 m_calibratedCounts = 0;
+    bool m_directTouch = false;
+    bool m_touchDrag = false;
 
     quintptr m_socket = 0;
     int m_screenWidth = 1080;

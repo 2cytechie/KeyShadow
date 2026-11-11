@@ -15,6 +15,18 @@ constexpr quint64 kJoystickPointer = 0;
 constexpr quint64 kLookPointer = 1;
 constexpr quint64 kMaxPointer = 15;
 
+/// 区域中心抖动：每次按下/回中时在 ±(半径比例) 内随机偏移，并钳制在屏幕内。
+QPointF jitteredCenter(HumanizerEngine *humanizer, const QPointF &centerPx, double radiusPx,
+                       int screenWidth, int screenHeight) {
+    if (!humanizer) {
+        return centerPx;
+    }
+    const QPointF shifted(centerPx.x() + humanizer->regionJitter(radiusPx),
+                          centerPx.y() + humanizer->regionJitter(radiusPx));
+    return QPointF(std::clamp(shifted.x(), 0.0, std::max(0, screenWidth - 1) * 1.0),
+                   std::clamp(shifted.y(), 0.0, std::max(0, screenHeight - 1) * 1.0));
+}
+
 qint64 qpcNow() {
     LARGE_INTEGER value;
     QueryPerformanceCounter(&value);
@@ -103,6 +115,16 @@ int HumanizerEngine::jitter() {
     return dist(m_rng);
 }
 
+int HumanizerEngine::regionJitter(double radiusPx) {
+    if (!m_enabled) {
+        return 0;
+    }
+    // 付费版固定 6% 半径；基础版不会启用拟人化。
+    const int range = std::max(1, static_cast<int>(std::lround(radiusPx * 0.06)));
+    std::uniform_int_distribution<int> dist(-range, range);
+    return dist(m_rng);
+}
+
 int HumanizerEngine::firstMoveDelayMs() {
     if (!m_enabled) {
         return 0;
@@ -165,16 +187,18 @@ bool JoystickEngine::tick(int dtMs, const std::function<void(const QByteArray &)
         }
         t = std::pow(std::clamp(t, 0.0, 1.0), m_curve);
 
-        const QPointF target = centerPx + QPointF(fx * radiusPx * t, fy * radiusPx * t);
-
         if (!m_active) {
             m_active = true;
             m_releasing = false;
-            m_currentPixel = centerPx;
-            send(touchMessage(kJoystickPointer, proto::TouchAction::Down, centerPx, m_screenWidth,
-                              m_screenHeight));
+            // 每次激活对区域中心做拟人化抖动，避免触点长期固定在同一像素。
+            m_basePixel = jitteredCenter(m_humanizer, centerPx, radiusPx, m_screenWidth,
+                                         m_screenHeight);
+            m_currentPixel = m_basePixel;
+            send(touchMessage(kJoystickPointer, proto::TouchAction::Down, m_basePixel,
+                              m_screenWidth, m_screenHeight));
         }
 
+        const QPointF target = m_basePixel + QPointF(fx * radiusPx * t, fy * radiusPx * t);
         const QPointF delta = target - m_currentPixel;
         if (std::abs(delta.x()) >= 0.5 || std::abs(delta.y()) >= 0.5) {
             m_currentPixel = target;
@@ -193,13 +217,13 @@ bool JoystickEngine::tick(int dtMs, const std::function<void(const QByteArray &)
         m_releaseElapsedMs += dtMs;
         const double k = std::clamp(m_releaseElapsedMs / 80.0, 0.0, 1.0);
         const double eased = easeOutCubic(k);
-        const QPointF pos = m_releaseFrom + (centerPx - m_releaseFrom) * eased;
+        const QPointF pos = m_releaseFrom + (m_basePixel - m_releaseFrom) * eased;
         send(touchMessage(kJoystickPointer, proto::TouchAction::Move, pos, m_screenWidth,
                           m_screenHeight));
         m_currentPixel = pos;
         if (k >= 1.0) {
-            send(touchMessage(kJoystickPointer, proto::TouchAction::Up, centerPx, m_screenWidth,
-                              m_screenHeight));
+            send(touchMessage(kJoystickPointer, proto::TouchAction::Up, m_basePixel,
+                              m_screenWidth, m_screenHeight));
             m_active = false;
             m_releasing = false;
         }
@@ -262,10 +286,14 @@ bool LookEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &s
 
     if (!m_active) {
         m_active = true;
-        m_fingerPixel = centerPx;
+        // 每次按下对视角区域中心做拟人化抖动。
+        m_basePixel = jitteredCenter(m_humanizer, centerPx, m_radius * std::min(m_screenWidth,
+                                                                               m_screenHeight),
+                                     m_screenWidth, m_screenHeight);
+        m_fingerPixel = m_basePixel;
         emitTouch(send, static_cast<int>(proto::TouchAction::Down),
-                  static_cast<int>(std::lround(centerPx.x())),
-                  static_cast<int>(std::lround(centerPx.y())));
+                  static_cast<int>(std::lround(m_basePixel.x())),
+                  static_cast<int>(std::lround(m_basePixel.y())));
     }
 
     double remainingX = m_accumX * pixelsPerCount;
@@ -276,22 +304,25 @@ bool LookEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &s
     // lift-recenter 循环：手指滑到边界 → 抬起 → 回中心 → 继续，实现无限转向
     int guard = 0;
     while ((std::abs(remainingX) > 0.01 || std::abs(remainingY) > 0.01) && guard++ < 16) {
-        const double roomX = remainingX >= 0 ? (centerPx.x() + radiusX - m_fingerPixel.x())
-                                             : (m_fingerPixel.x() - (centerPx.x() - radiusX));
-        const double roomY = remainingY >= 0 ? (centerPx.y() + radiusY - m_fingerPixel.y())
-                                             : (m_fingerPixel.y() - (centerPx.y() - radiusY));
+        const double roomX = remainingX >= 0 ? (m_basePixel.x() + radiusX - m_fingerPixel.x())
+                                             : (m_fingerPixel.x() - (m_basePixel.x() - radiusX));
+        const double roomY = remainingY >= 0 ? (m_basePixel.y() + radiusY - m_fingerPixel.y())
+                                             : (m_fingerPixel.y() - (m_basePixel.y() - radiusY));
         const double stepX = std::clamp(remainingX, -std::max(0.0, roomX), std::max(0.0, roomX));
         const double stepY = std::clamp(remainingY, -std::max(0.0, roomY), std::max(0.0, roomY));
 
         if (std::abs(stepX) < 0.01 && std::abs(stepY) < 0.01) {
-            // 已到边界：抬起 → 回中心重新按下
+            // 已到边界：抬起 → 回中心重新按下（回中时重新抖动）
             emitTouch(send, static_cast<int>(proto::TouchAction::Up),
                       static_cast<int>(std::lround(m_fingerPixel.x())),
                       static_cast<int>(std::lround(m_fingerPixel.y())));
-            m_fingerPixel = centerPx;
+            m_basePixel = jitteredCenter(m_humanizer, centerPx,
+                                         m_radius * std::min(m_screenWidth, m_screenHeight),
+                                         m_screenWidth, m_screenHeight);
+            m_fingerPixel = m_basePixel;
             emitTouch(send, static_cast<int>(proto::TouchAction::Down),
-                      static_cast<int>(std::lround(centerPx.x())),
-                      static_cast<int>(std::lround(centerPx.y())));
+                      static_cast<int>(std::lround(m_basePixel.x())),
+                      static_cast<int>(std::lround(m_basePixel.y())));
             continue;
         }
 
@@ -578,6 +609,8 @@ double SensCalibrator::suggestedCountsPer180(double previous) const {
 // ---------------------------------------------------------------------------
 InputEngine::InputEngine() {
     m_keymap.setHumanizer(&m_humanizer);
+    m_joystick.setHumanizer(&m_humanizer);
+    m_look.setHumanizer(&m_humanizer);
     setProfile(m_profile);
 }
 
@@ -609,6 +642,16 @@ void InputEngine::handleInput(const InputEvent &event) {
             m_calibrator.addCounts(event.dx, event.dy);
         }
         return;
+    }
+
+    // 窗口态直操：左键与拖动由画布 Qt 事件注入触控，Raw Input 不再参与映射
+    if (m_directTouchEnabled) {
+        if (event.type == InputEventType::MouseButton && event.button == 0) {
+            return;
+        }
+        if (event.type == InputEventType::MouseMove && m_touchDragActive) {
+            return;
+        }
     }
 
     // 呼出键不参与映射：其按下/抬起不进入键位引擎

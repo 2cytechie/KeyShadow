@@ -14,13 +14,17 @@ class KeymapOverlay : public QWidget {
 public:
     explicit KeymapOverlay(QWidget *parent = nullptr);
 
+    /// 可编辑区域目标：轮盘 / 视角触发区。
+    enum class Region { None = 0, Joystick = 1, Look = 2 };
+
     void setProfile(const Profile &profile);
     const Profile &profile() const { return m_profile; }
     void setSelected(int index);
     int selected() const { return m_selected; }
+    void setSelectedRegion(Region region);
+    Region selectedRegion() const { return m_selectedRegion; }
     void setGridEnabled(bool enabled);
     void setSnapEnabled(bool enabled);
-    void setOverlaps(const QVector<QPair<int, int>> &pairs);
     void setEmptyHint(const QString &text);
 
 signals:
@@ -28,6 +32,10 @@ signals:
     void bindingMoved(int index);
     void bindingResized(int index);
     void bindingEdited();
+    void regionSelected(int region);
+    void regionMoved(int region);
+    void regionResized(int region);
+    void regionEdited();
     void deleteRequested();
     void saveRequested();
     void exitRequested();
@@ -45,14 +53,21 @@ private:
     QPointF toNormalized(const QPoint &pos) const;
     double pixelRadius(double normalizedRadius) const;
     int hitTest(const QPoint &pos) const;
+    int hitTestRegion(const QPoint &pos) const;
+    QPointF regionCenter(int region) const;
+    double regionRadius(int region) const;
+    void setRegionCenter(int region, const QPointF &normalized);
+    void setRegionRadius(int region, double radius);
 
     Profile m_profile;
     int m_selected = -1;
+    Region m_selectedRegion = Region::None;
     bool m_grid = true;
     bool m_snap = true;
     bool m_dragging = false;
     QPointF m_dragOffset;
-    QVector<QPair<int, int>> m_overlaps;
+    bool m_draggingRegion = false;
+    QPointF m_regionDragOffset;
     QString m_emptyHint;
 };
 

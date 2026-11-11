@@ -12,6 +12,7 @@
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCloseEvent>
+#include <QEvent>
 #include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -116,7 +117,9 @@ MainWindow::MainWindow(Session *session, QWidget *parent) : QMainWindow(parent),
     setFocusPolicy(Qt::StrongFocus);
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+    releaseCursorClip();
+}
 
 void MainWindow::buildTitleBar(QWidget *root, QVBoxLayout *layout) {
     m_titleBar = new QWidget(root);
@@ -318,9 +321,47 @@ void MainWindow::setGameMode(bool enabled) {
 
     if (enabled) {
         showFullScreen();
+        // 全屏几何在下一拍才稳定，之后再约束光标。
+        QTimer::singleShot(0, this, [this] { updateCursorClip(); });
     } else {
+        releaseCursorClip();
         showNormal();
     }
+}
+
+void MainWindow::updateCursorClip() {
+    if (!m_gameMode || !isFullScreen()) {
+        return;
+    }
+    const QRect frame = frameGeometry();
+    if (frame.isEmpty()) {
+        return;
+    }
+    RECT rect{frame.left(), frame.top(), frame.right() + 1, frame.bottom() + 1};
+    ClipCursor(&rect);
+}
+
+void MainWindow::releaseCursorClip() { ClipCursor(nullptr); }
+
+bool MainWindow::event(QEvent *event) {
+    switch (event->type()) {
+    case QEvent::WindowActivate:
+        if (m_gameMode) {
+            updateCursorClip();
+        }
+        break;
+    case QEvent::WindowDeactivate:
+        releaseCursorClip();
+        break;
+    case QEvent::Resize:
+        if (m_gameMode && isFullScreen()) {
+            updateCursorClip();
+        }
+        break;
+    default:
+        break;
+    }
+    return QMainWindow::event(event);
 }
 
 void MainWindow::showEvent(QShowEvent *event) {

@@ -7,6 +7,8 @@
 
 class QCheckBox;
 class QComboBox;
+class QDoubleSpinBox;
+class QButtonGroup;
 class QFrame;
 class QHBoxLayout;
 class QLabel;
@@ -92,6 +94,9 @@ private:
     void updateInputCapture();
     void enterPointerMode();
     void exitPointerMode();
+    /// 画布触控是否可用：指针模式，或窗口态（非全屏）映射模式。
+    bool canvasTouchActive() const;
+    void cancelTouchDrag();
     bool mapToDevice(const QPoint &widgetPos, QPoint *devicePos) const;
     void sendPointerTouch(int action, const QPoint &widgetPos, bool clampInside);
     QSize deviceSize() const;
@@ -106,8 +111,9 @@ private:
     void loadKeymapProfile(const QString &name);
     void refreshKeymapSummary();
     void refreshKeymapProperties();
-    void updateKeymapOverlaps();
     void markKeymapDirty();
+    void setRegionTarget(int region);
+    void updateMouseModeButton();
     void addKeymapBinding();
     void deleteKeymapBinding();
     void createKeymapProfile();
@@ -117,7 +123,6 @@ private:
     void stopKeyCapture();
     void applyBindingFromUi();
     int selectedBinding() const;
-    void openCalibration();
 
     void showHud(const QString &text, bool persistent = false);
     void hideHudSoon();
@@ -172,19 +177,22 @@ private:
     QPushButton *m_exportProfileButton = nullptr;
     QLabel *m_keymapSummary = nullptr;
     QPushButton *m_editKeymapButton = nullptr;
-    QPushButton *m_calibrateButton = nullptr;
     QCheckBox *m_gridCheck = nullptr;
     QCheckBox *m_snapCheck = nullptr;
     QPushButton *m_addBindingButton = nullptr;
     QPushButton *m_saveKeymapButton = nullptr;
     QPushButton *m_exitEditButton = nullptr;
+    QSlider *m_sensitivitySlider = nullptr;
+    QDoubleSpinBox *m_sensitivitySpin = nullptr;
+    QPushButton *m_joystickTargetButton = nullptr;
+    QPushButton *m_lookTargetButton = nullptr;
+    QButtonGroup *m_regionGroup = nullptr;
     QPushButton *m_keyCaptureButton = nullptr;
     QSpinBox *m_xSpin = nullptr;
     QSpinBox *m_ySpin = nullptr;
     QSlider *m_sizeSlider = nullptr;
     QComboBox *m_actionCombo = nullptr;
     QPushButton *m_deleteBindingButton = nullptr;
-    QLabel *m_overlapLabel = nullptr;
 
     // 状态栏
     QLabel *m_statusAdb = nullptr;
@@ -200,6 +208,7 @@ private:
     bool m_active = false;
     bool m_gameMode = false;
     bool m_draggingTouch = false;
+    QPoint m_lastTouchPos;
     bool m_summonHeld = false;
     bool m_summonHintShown = false;
     SummonMode m_summonMode = SummonMode::LongPress;
@@ -208,6 +217,7 @@ private:
 
     Profile m_keymapProfile;
     int m_keymapSelected = -1;
+    int m_regionTarget = 0; ///< 0=无，1=轮盘，2=视角触发区
     bool m_keymapDirty = false;
     bool m_capturingKey = false;
 };

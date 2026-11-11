@@ -31,6 +31,7 @@ public:
 
 protected:
     bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
+    bool event(QEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
@@ -42,6 +43,9 @@ private:
     void buildPages(QWidget *body, QHBoxLayout *layout);
     void navigateTo(int index);
     void showToast(const QString &text);
+    /// 全屏游戏模式：把系统光标限制在窗口内，避免移动到其他屏幕。
+    void updateCursorClip();
+    void releaseCursorClip();
 
     Session *m_session = nullptr;
     QWidget *m_central = nullptr;

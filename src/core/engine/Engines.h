@@ -53,6 +53,7 @@ struct Profile {
     double lookSensitivity = 1.0;
     double lookCountsPer180 = 3000.0; ///< 校准结果：180° 转身所需鼠标计数
 
+    /// 运行期有效值：由 Session 按授权写入（Pro 自动开启），不持久化、不提供 UI。
     bool humanizerEnabled = true;
     bool proHumanizer = false;
 
@@ -83,14 +84,16 @@ public:
     void setEnhanced(bool enhanced) { m_enhanced = enhanced; }
     bool enabled() const { return m_enabled; }
 
-    /// tap 按下时长（40-120ms；增强档 35-160ms）。
+    /// tap 按下时长（35-160ms）。
     int tapDurationMs();
-    /// MOVE 插值段数（短滑 3 段，增强档更多）。
+    /// MOVE 插值段数（按距离分段）。
     int moveSteps(int distancePx) const;
-    /// 单段抖动（±1px，增强档 ±1.5px）。
+    /// 单段抖动（±2px）。
     int jitter();
     /// DOWN→MOVE 首帧延迟。
     int firstMoveDelayMs();
+    /// 区域中心抖动（像素）：±6% 半径，每轴独立均匀；关闭时返回 0。
+    int regionJitter(double radiusPx);
 
 private:
     bool m_enabled = true;
@@ -108,6 +111,8 @@ public:
     void reset();
     /// 若触点仍按下则先发送抬触，再清除状态（模式切换/断线时使用）。
     void release(const std::function<void(const QByteArray &)> &send);
+    /// 注入拟人化抖动：每次激活时对区域中心做随机偏移。
+    void setHumanizer(HumanizerEngine *humanizer) { m_humanizer = humanizer; }
 
     /// 返回 true 表示产生了事件（写入 send）。
     bool tick(int dtMs, const std::function<void(const QByteArray &)> &send);
@@ -122,6 +127,8 @@ private:
     double m_curve = 1.0;
     int m_screenWidth = 1920;
     int m_screenHeight = 1080;
+    HumanizerEngine *m_humanizer = nullptr;
+    QPointF m_basePixel; ///< 本次激活的抖动后中心
 
     bool m_up = false;
     bool m_down = false;
@@ -149,6 +156,8 @@ public:
 
     void configure(const QPointF &centerNorm, double radiusNorm, double sensitivity,
                    double countsPer180, int screenWidth, int screenHeight);
+    /// 注入拟人化抖动：每次按下与回中时对区域中心做随机偏移。
+    void setHumanizer(HumanizerEngine *humanizer) { m_humanizer = humanizer; }
 
 private:
     void emitTouch(const std::function<void(const QByteArray &)> &send, int action, int x, int y);
@@ -159,6 +168,8 @@ private:
     double m_countsPer180 = 3000.0;
     int m_screenWidth = 1920;
     int m_screenHeight = 1080;
+    HumanizerEngine *m_humanizer = nullptr;
+    QPointF m_basePixel; ///< 本轮按下/回中后的抖动中心
 
     double m_accumX = 0.0;
     double m_accumY = 0.0;
@@ -252,6 +263,11 @@ public:
     void setIgnoredKey(int vk) { m_ignoredKey = vk; }
     int ignoredKey() const { return m_ignoredKey; }
 
+    /// 窗口态直操：左键由画布 Qt 事件注入触控，Raw Input 不再映射鼠标左键。
+    void setDirectTouchEnabled(bool enabled) { m_directTouchEnabled = enabled; }
+    /// 画布触控拖动进行中：丢弃鼠标位移，避免滑动手机 UI 时视角同时转动。
+    void setTouchDragActive(bool active) { m_touchDragActive = active; }
+
     SensCalibrator &calibrator() { return m_calibrator; }
     JoystickEngine &joystick() { return m_joystick; }
     LookEngine &look() { return m_look; }
@@ -276,6 +292,8 @@ private:
     qint64 m_lastInputQpc = 0;
     double m_latencyMs = -1.0;
     int m_ignoredKey = 0;
+    bool m_directTouchEnabled = false;
+    bool m_touchDragActive = false;
 
     // WASD 摇杆按键状态（WASD 固定用于走位，不依赖键位方案）
     bool m_joyUp = false;

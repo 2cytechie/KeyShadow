@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -280,6 +281,124 @@ void testSummonKeyFilter() {
 }
 
 // ---------------------------------------------------------------------------
+void testDirectTouchFilter() {
+    ks::Profile profile;
+    ks::KeyBinding binding;
+    binding.vk = 0x01; // VK_LBUTTON
+    binding.action = ks::BindingAction::Tap;
+    binding.center = QPointF(0.5, 0.5);
+    binding.radius = 0.05;
+    profile.bindings.append(binding);
+
+    ks::InputEngine engine;
+    engine.setScreenSize(1000, 1000);
+    engine.setProfile(profile);
+
+    std::vector<QByteArray> messages;
+    auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
+
+    ks::InputEvent down;
+    down.type = ks::InputEventType::MouseButton;
+    down.button = 0;
+    down.down = true;
+
+    engine.setDirectTouchEnabled(true);
+    engine.handleInput(down);
+    engine.tick(10, sink);
+    check(messages.empty(), "direct touch drops left button mapping");
+
+    engine.setDirectTouchEnabled(false);
+    engine.handleInput(down);
+    engine.tick(10, sink);
+    check(!messages.empty(), "left button maps again after direct touch off");
+
+    engine.releaseAll(sink);
+    messages.clear();
+    ks::InputEvent move;
+    move.type = ks::InputEventType::MouseMove;
+    move.dx = 200;
+    engine.setDirectTouchEnabled(true);
+    engine.setTouchDragActive(true);
+    engine.handleInput(move);
+    engine.tick(10, sink);
+    check(messages.empty(), "direct touch drag suppresses look move");
+
+    engine.setTouchDragActive(false);
+    engine.handleInput(move);
+    engine.tick(10, sink);
+    check(!messages.empty(), "look resumes after drag ends");
+}
+
+// ---------------------------------------------------------------------------
+void testRegionJitter() {
+    ks::HumanizerEngine humanizer;
+    std::vector<QByteArray> messages;
+    auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
+    auto collectDown = [&messages](std::set<std::pair<int, int>> *points) {
+        for (const QByteArray &message : messages) {
+            if (static_cast<quint8>(message.at(1)) == 0) {
+                points->insert({static_cast<int>(read32(message, 10)),
+                                static_cast<int>(read32(message, 14))});
+            }
+        }
+    };
+
+    ks::JoystickEngine joystick;
+    joystick.configure(QPointF(0.2, 0.8), 0.1, 0.0, 1.0, 1080, 2400);
+    joystick.setHumanizer(&humanizer);
+
+    std::set<std::pair<int, int>> points;
+    for (int i = 0; i < 12; ++i) {
+        joystick.reset();
+        joystick.setKeys(false, false, false, true);
+        messages.clear();
+        joystick.tick(16, sink);
+        collectDown(&points);
+    }
+    check(points.size() > 1, "joystick center jitter varies across activations");
+
+    humanizer.setEnabled(false);
+    points.clear();
+    for (int i = 0; i < 5; ++i) {
+        joystick.reset();
+        joystick.setKeys(false, false, false, true);
+        messages.clear();
+        joystick.tick(16, sink);
+        collectDown(&points);
+    }
+    check(points.size() == 1, "joystick center fixed when humanizer disabled");
+    check(!points.empty() && points.begin()->first == 216 && points.begin()->second == 1920,
+          "joystick center matches configured point");
+
+    humanizer.setEnabled(true);
+    ks::LookEngine look;
+    look.configure(QPointF(0.7, 0.5), 0.2, 1.0, 3000.0, 1080, 2400);
+    look.setHumanizer(&humanizer);
+    points.clear();
+    for (int i = 0; i < 12; ++i) {
+        look.reset();
+        look.addDelta(100, 0, 0);
+        messages.clear();
+        look.tick(16, sink);
+        collectDown(&points);
+    }
+    check(points.size() > 1, "look center jitter varies across activations");
+
+    humanizer.setEnabled(false);
+    points.clear();
+    for (int i = 0; i < 5; ++i) {
+        look.reset();
+        look.addDelta(100, 0, 0);
+        messages.clear();
+        look.tick(16, sink);
+        collectDown(&points);
+    }
+    check(points.size() == 1, "look center fixed when humanizer disabled");
+    check(!points.empty() && points.begin()->first == 756 && points.begin()->second == 1200,
+          "look center matches configured point");
+}
+
+// ---------------------------------------------------------------------------
 void testCalibrator() {
     ks::SensCalibrator calibrator;
     calibrator.begin();
@@ -328,6 +447,8 @@ int main(int argc, char *argv[]) {
     testLookEngine();
     testKeymap();
     testSummonKeyFilter();
+    testDirectTouchFilter();
+    testRegionJitter();
     testCalibrator();
     testProfileStore();
 

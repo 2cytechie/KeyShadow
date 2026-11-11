@@ -63,6 +63,11 @@ public:
     void setInputCaptureEnabled(bool enabled);
     bool inputCaptureEnabled() const;
 
+    /// 窗口态直操：左键由画布 Qt 事件注入触控，Raw Input 不再映射左键与拖动期视角。
+    void setDirectTouchEnabled(bool enabled);
+    /// 画布触控拖动按下/抬起时同步，拖动期间暂停鼠标视角注入。
+    void setTouchDragActive(bool active);
+
     /// 呼出鼠标键（Windows VK，默认 Alt）。呼出键不参与键位映射。
     void setSummonKey(int vk);
     int summonKey() const { return m_summonKey; }
@@ -144,6 +149,7 @@ private:
     bool m_screenOff = false;
     int m_summonKey = 0x12; ///< VK_MENU
     bool m_summonDown = false;
+    bool m_directTouchEnabled = false;
 };
 
 } // namespace ks

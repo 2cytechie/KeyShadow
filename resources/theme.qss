@@ -193,6 +193,46 @@ QPushButton[variant="ghost"]:hover {
     color: #E8EDF2;
 }
 
+QPushButton[variant="outline"] {
+    border: 1px solid #333D4A;
+    background: transparent;
+    color: #E8EDF2;
+    min-height: 28px;
+    padding: 0 10px;
+}
+
+QPushButton[variant="outline"]:hover {
+    background: #222833;
+    border-color: #00D9B8;
+}
+
+QPushButton[variant="outline"]:disabled {
+    border-color: #232A33;
+    color: #4A5563;
+    background: transparent;
+}
+
+/* 方框单选（呼出方式 / 轮盘-视角目标） */
+QPushButton[role="option"] {
+    background: #0E1116;
+    border: 1px solid #333D4A;
+    border-radius: 6px;
+    color: #9BA7B4;
+    padding: 0 12px;
+}
+
+QPushButton[role="option"]:hover {
+    border-color: #00D9B8;
+    color: #E8EDF2;
+}
+
+QPushButton[role="option"]:checked {
+    border-color: #00D9B8;
+    background: rgba(0, 217, 184, 0.14);
+    color: #E8EDF2;
+    font-weight: 600;
+}
+
 QPushButton[role="summonKey"] {
     font-family: "Cascadia Mono", "Consolas", monospace;
     text-align: center;
@@ -248,6 +288,21 @@ QToolButton#WindowButton:hover {
 
 QToolButton#WindowClose:hover {
     background: #FF5C5C;
+}
+
+/* 画布悬浮按钮组 */
+QWidget#FloatingButtons {
+    background: rgba(8, 10, 13, 0.55);
+    border-radius: 6px;
+}
+
+QToolButton#MouseModeButton:hover {
+    background: #222833;
+}
+
+QToolButton#MouseModeButton:checked {
+    background: rgba(0, 217, 184, 0.20);
+    border: 1px solid #00D9B8;
 }
 
 /* ------------------------------- 输入 ------------------------------- */
