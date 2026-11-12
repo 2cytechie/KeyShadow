@@ -58,6 +58,11 @@ public:
     void onSummonKeyPressed(bool down);
     void beginKeymapEdit();
 
+    /// 全屏信息悬浮开关（码率/帧率/延迟，设置页 → MainWindow 转发）。
+    void setStatsOverlayEnabled(bool enabled);
+    /// 疾跑状态变化（Session 主线程拦截疾跑键后转发）：游戏态 HUD 提示。
+    void onSprintToggled(bool active);
+
 signals:
     void requestExitGameMode();
     void toggleGameMode();
@@ -80,8 +85,8 @@ private:
     QWidget *buildQualityTab();
     QWidget *buildKeymapTab();
     void buildStatusBar(QVBoxLayout *rootLayout);
-    void buildFloatingButtons();
     void layoutVideoOverlays();
+    void updateStatsOverlay();
 
     void refreshProfileToUi();
     void refreshQualityToUi();
@@ -123,6 +128,8 @@ private:
     void stopKeyCapture();
     void applyBindingFromUi();
     int selectedBinding() const;
+    /// 当前方案是否把该滚轮方向绑定为按键。
+    bool wheelBound(int delta) const;
 
     void showHud(const QString &text, bool persistent = false);
     void hideHudSoon();
@@ -144,6 +151,7 @@ private:
     QComboBox *m_resolutionCombo = nullptr;
     QComboBox *m_fpsCombo = nullptr;
     QComboBox *m_bitrateCombo = nullptr;
+    QToolButton *m_mouseButton = nullptr;
     QPushButton *m_toolbarFullscreenButton = nullptr;
 
     // 视频区
@@ -151,9 +159,7 @@ private:
     KeymapOverlay *m_overlay = nullptr;
     QLabel *m_hud = nullptr;
     QLabel *m_summonHint = nullptr;
-    QWidget *m_floatingButtons = nullptr;
-    QToolButton *m_mouseButton = nullptr;
-    QToolButton *m_fullscreenButton = nullptr;
+    QLabel *m_statsOverlay = nullptr;
 
     // 检查器
     QFrame *m_inspector = nullptr;
@@ -184,14 +190,13 @@ private:
     QPushButton *m_exitEditButton = nullptr;
     QSlider *m_sensitivitySlider = nullptr;
     QDoubleSpinBox *m_sensitivitySpin = nullptr;
-    QPushButton *m_joystickTargetButton = nullptr;
-    QPushButton *m_lookTargetButton = nullptr;
-    QButtonGroup *m_regionGroup = nullptr;
+    QLabel *m_sizeLabel = nullptr;
+    QSlider *m_sizeSlider = nullptr;
+    QWidget *m_sprintSizeRow = nullptr;
+    QSlider *m_sprintSizeSlider = nullptr;
     QPushButton *m_keyCaptureButton = nullptr;
     QSpinBox *m_xSpin = nullptr;
     QSpinBox *m_ySpin = nullptr;
-    QSlider *m_sizeSlider = nullptr;
-    QComboBox *m_actionCombo = nullptr;
     QPushButton *m_deleteBindingButton = nullptr;
 
     // 状态栏
@@ -217,9 +222,11 @@ private:
 
     Profile m_keymapProfile;
     int m_keymapSelected = -1;
-    int m_regionTarget = 0; ///< 0=无，1=轮盘，2=视角触发区
+    int m_regionTarget = 0; ///< 0=无，1=轮盘，2=视角触发区（由画布点选）
     bool m_keymapDirty = false;
     bool m_capturingKey = false;
+    bool m_syncingBindingUi = false; ///< 属性面板回填 UI 时屏蔽 applyBindingFromUi
+    bool m_statsOverlayEnabled = true;
 };
 
 } // namespace ks::ui

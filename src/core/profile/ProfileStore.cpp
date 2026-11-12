@@ -7,6 +7,8 @@
 #include <QJsonObject>
 #include <QStandardPaths>
 
+#include <algorithm>
+
 namespace ks {
 namespace {
 
@@ -22,29 +24,6 @@ QPointF pointFromJson(const QJsonObject &obj) {
                    obj.value(QStringLiteral("y")).toDouble(0.5));
 }
 
-QString actionToString(BindingAction action) {
-    switch (action) {
-    case BindingAction::Tap: return QStringLiteral("tap");
-    case BindingAction::Hold: return QStringLiteral("hold");
-    case BindingAction::Slide: return QStringLiteral("slide");
-    case BindingAction::Double: return QStringLiteral("double");
-    }
-    return QStringLiteral("tap");
-}
-
-BindingAction actionFromString(const QString &text) {
-    if (text == QStringLiteral("hold")) {
-        return BindingAction::Hold;
-    }
-    if (text == QStringLiteral("slide")) {
-        return BindingAction::Slide;
-    }
-    if (text == QStringLiteral("double")) {
-        return BindingAction::Double;
-    }
-    return BindingAction::Tap;
-}
-
 QJsonObject profileToJson(const Profile &profile) {
     QJsonObject obj;
     obj.insert(QStringLiteral("name"), profile.name);
@@ -52,6 +31,7 @@ QJsonObject profileToJson(const Profile &profile) {
     QJsonObject joystick;
     joystick.insert(QStringLiteral("center"), pointToJson(profile.joystickCenter));
     joystick.insert(QStringLiteral("radius"), profile.joystickRadius);
+    joystick.insert(QStringLiteral("sprintRadius"), profile.joystickSprintRadius);
     joystick.insert(QStringLiteral("deadzone"), profile.joystickDeadzone);
     joystick.insert(QStringLiteral("curve"), profile.joystickCurve);
     obj.insert(QStringLiteral("joystick"), joystick);
@@ -84,10 +64,8 @@ QJsonObject profileToJson(const Profile &profile) {
     for (const KeyBinding &binding : profile.bindings) {
         QJsonObject item;
         item.insert(QStringLiteral("vk"), binding.vk);
-        item.insert(QStringLiteral("action"), actionToString(binding.action));
         item.insert(QStringLiteral("center"), pointToJson(binding.center));
         item.insert(QStringLiteral("radius"), binding.radius);
-        item.insert(QStringLiteral("slideTo"), pointToJson(binding.slideTo));
         bindings.append(item);
     }
     obj.insert(QStringLiteral("bindings"), bindings);
@@ -101,7 +79,12 @@ Profile profileFromJson(const QJsonObject &obj) {
 
     const QJsonObject joystick = obj.value(QStringLiteral("joystick")).toObject();
     profile.joystickCenter = pointFromJson(joystick.value(QStringLiteral("center")).toObject());
-    profile.joystickRadius = joystick.value(QStringLiteral("radius")).toDouble(0.085);
+    profile.joystickRadius = std::clamp(joystick.value(QStringLiteral("radius")).toDouble(0.085),
+                                        0.02, 0.30);
+    // 疾跑大圆不小于小圆：旧文件/手改文件越界时钳制。
+    profile.joystickSprintRadius =
+        std::clamp(joystick.value(QStringLiteral("sprintRadius")).toDouble(0.13),
+                   profile.joystickRadius, 0.30);
     profile.joystickDeadzone = joystick.value(QStringLiteral("deadzone")).toDouble(0.12);
     profile.joystickCurve = joystick.value(QStringLiteral("curve")).toDouble(1.0);
 
@@ -127,14 +110,13 @@ Profile profileFromJson(const QJsonObject &obj) {
     profile.screenOff = video.value(QStringLiteral("screenOff")).toBool(false);
 
     const QJsonArray bindings = obj.value(QStringLiteral("bindings")).toArray();
+    // 旧版 action/slideTo 字段直接忽略（键位已全部改为直通语义，不做旧版兼容）。
     for (const QJsonValue &value : bindings) {
         const QJsonObject item = value.toObject();
         KeyBinding binding;
         binding.vk = item.value(QStringLiteral("vk")).toInt();
-        binding.action = actionFromString(item.value(QStringLiteral("action")).toString());
         binding.center = pointFromJson(item.value(QStringLiteral("center")).toObject());
         binding.radius = item.value(QStringLiteral("radius")).toDouble(0.05);
-        binding.slideTo = pointFromJson(item.value(QStringLiteral("slideTo")).toObject());
         profile.bindings.append(binding);
     }
 
@@ -270,27 +252,25 @@ Profile ProfileStore::makeDefaultProfile() {
     Profile profile;
     profile.name = defaultProfileName();
 
-    auto add = [&profile](int vk, BindingAction action, double x, double y, double radius) {
+    auto add = [&profile](int vk, double x, double y, double radius) {
         KeyBinding binding;
         binding.vk = vk;
-        binding.action = action;
         binding.center = QPointF(x, y);
         binding.radius = radius;
-        binding.slideTo = QPointF(x, y);
         profile.bindings.append(binding);
     };
 
     // 和平精英常见键位基线（坐标为归一化，可在键位编辑器中拖拽微调）
-    add(0x01, BindingAction::Tap, 0.855, 0.690, 0.055);  // 左键：开火
-    add(0x02, BindingAction::Hold, 0.930, 0.420, 0.048); // 右键：开镜
-    add(0x20, BindingAction::Tap, 0.700, 0.905, 0.045);  // 空格：跳跃
-    add(0x43, BindingAction::Tap, 0.600, 0.860, 0.038);  // C：蹲下
-    add(0x52, BindingAction::Tap, 0.520, 0.860, 0.038);  // R：换弹
-    add(0x51, BindingAction::Tap, 0.440, 0.860, 0.038);  // Q：切枪
-    add(0x46, BindingAction::Tap, 0.320, 0.930, 0.042);  // F：拾取
-    add(0x54, BindingAction::Tap, 0.210, 0.930, 0.042);  // T：语音
-    add(0x09, BindingAction::Tap, 0.060, 0.100, 0.038);  // Tab：背包
-    add(0x4D, BindingAction::Tap, 0.170, 0.100, 0.038);  // M：地图
+    add(0x01, 0.855, 0.690, 0.055);  // 左键：开火
+    add(0x02, 0.930, 0.420, 0.048); // 右键：开镜
+    add(0x20, 0.700, 0.905, 0.045);  // 空格：跳跃
+    add(0x43, 0.600, 0.860, 0.038);  // C：蹲下
+    add(0x52, 0.520, 0.860, 0.038);  // R：换弹
+    add(0x51, 0.440, 0.860, 0.038);  // Q：切枪
+    add(0x46, 0.320, 0.930, 0.042);  // F：拾取
+    add(0x54, 0.210, 0.930, 0.042);  // T：语音
+    add(0x09, 0.060, 0.100, 0.038);  // Tab：背包
+    add(0x4D, 0.170, 0.100, 0.038);  // M：地图
 
     return profile;
 }

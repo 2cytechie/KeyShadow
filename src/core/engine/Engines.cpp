@@ -51,15 +51,6 @@ QPointF toPixel(const QPointF &norm, int width, int height) {
     return QPointF(norm.x() * width, norm.y() * height);
 }
 
-int mouseButtonVk(int button) {
-    switch (button) {
-    case 0: return VK_LBUTTON;
-    case 1: return VK_RBUTTON;
-    case 2: return VK_MBUTTON;
-    default: return 0;
-    }
-}
-
 QByteArray touchMessage(quint64 pointer, proto::TouchAction action, const QPointF &pixel, int width,
                         int height, float pressure = 1.0f) {
     return proto::touch(action, pointer, static_cast<int>(std::lround(pixel.x())),
@@ -78,6 +69,17 @@ bool vkMatchesSummon(int eventVk, int summonVk) {
         return eventVk == VK_MENU || eventVk == VK_LMENU || eventVk == VK_RMENU;
     default:
         return eventVk == summonVk;
+    }
+}
+
+int mouseButtonVk(int button) {
+    switch (button) {
+    case 0: return VK_LBUTTON;
+    case 1: return VK_RBUTTON;
+    case 2: return VK_MBUTTON;
+    case 3: return VK_XBUTTON1;
+    case 4: return VK_XBUTTON2;
+    default: return 0;
     }
 }
 
@@ -156,7 +158,12 @@ void JoystickEngine::setKeys(bool up, bool down, bool left, bool right) {
 void JoystickEngine::reset() {
     m_active = false;
     m_releasing = false;
+    m_sprint = false;
     m_up = m_down = m_left = m_right = false;
+}
+
+void JoystickEngine::setSprintRadius(double radiusNorm) {
+    m_sprintRadius = std::clamp(radiusNorm, m_radius, 0.30);
 }
 
 void JoystickEngine::release(const std::function<void(const QByteArray &)> &send) {
@@ -173,7 +180,9 @@ bool JoystickEngine::tick(int dtMs, const std::function<void(const QByteArray &)
     const double magnitude = std::sqrt(fx * fx + fy * fy);
 
     const QPointF centerPx = toPixel(m_center, m_screenWidth, m_screenHeight);
-    const double radiusPx = m_radius * std::min(m_screenWidth, m_screenHeight);
+    // 疾跑开启时触点可滑到大圆边缘；同一力度映射更远。
+    const double radiusPx = (m_sprint ? m_sprintRadius : m_radius) * std::min(m_screenWidth,
+                                                                             m_screenHeight);
 
     if (magnitude > 0.0) {
         fx /= magnitude;
@@ -357,11 +366,13 @@ QPointF KeymapEngine::toPixel(const QPointF &norm) const {
 
 int KeymapEngine::allocatePointer(int vk) {
     for (int candidate = 2; candidate <= static_cast<int>(kMaxPointer); ++candidate) {
-        const bool used = std::any_of(m_actions.cbegin(), m_actions.cend(),
-                                      [candidate](const ActiveAction &a) {
-                                          return a.pointerId == candidate;
-                                      });
-        if (!used) {
+        const bool usedByAction =
+            std::any_of(m_actions.cbegin(), m_actions.cend(),
+                        [candidate](const ActiveAction &a) { return a.pointerId == candidate; });
+        const bool usedByWheel =
+            std::any_of(m_wheelPresses.cbegin(), m_wheelPresses.cend(),
+                        [candidate](const WheelPress &w) { return w.pointerId == candidate; });
+        if (!usedByAction && !usedByWheel) {
             return candidate;
         }
     }
@@ -369,22 +380,37 @@ int KeymapEngine::allocatePointer(int vk) {
     return 2;
 }
 
-void KeymapEngine::releasePointer(int vk, const std::function<void(const QByteArray &)> &send) {
-    for (int i = 0; i < m_actions.size(); ++i) {
-        if (m_actions[i].vk != vk) {
-            continue;
-        }
-        ActiveAction &action = m_actions[i];
-        send(proto::touch(proto::TouchAction::Up, static_cast<quint64>(action.pointerId),
-                          static_cast<int>(std::lround(action.fromPixel.x())),
-                          static_cast<int>(std::lround(action.fromPixel.y())), m_screenWidth,
-                          m_screenHeight));
-        m_actions.removeAt(i);
-        return;
-    }
-}
-
 bool KeymapEngine::handleKey(int vk, bool down, const std::function<void(const QByteArray &)> &send) {
+    // 直通语义：按下 = 手指按下，抬起 = 手指抬起；按住多久手指就按多久。
+    if (!down) {
+        m_suspendedVks.remove(vk);
+        for (int i = 0; i < m_actions.size(); ++i) {
+            if (m_actions[i].vk != vk) {
+                continue;
+            }
+            const ActiveAction &action = m_actions[i];
+            send(proto::touch(proto::TouchAction::Up, static_cast<quint64>(action.pointerId),
+                              static_cast<int>(std::lround(action.fromPixel.x())),
+                              static_cast<int>(std::lround(action.fromPixel.y())), m_screenWidth,
+                              m_screenHeight));
+            m_actions.removeAt(i);
+            return true;
+        }
+        return false;
+    }
+
+    // releaseAll（如呼出鼠标）已抬起但物理键仍按住：忽略其自动重复，等待松开后再生效。
+    if (m_suspendedVks.contains(vk)) {
+        return true;
+    }
+
+    // 按住重复（Raw 键盘自动重复）不重复派发
+    for (const ActiveAction &action : m_actions) {
+        if (action.vk == vk) {
+            return true;
+        }
+    }
+
     const KeyBinding *binding = nullptr;
     for (const KeyBinding &b : m_bindings) {
         if (b.vk == vk) {
@@ -396,172 +422,73 @@ bool KeymapEngine::handleKey(int vk, bool down, const std::function<void(const Q
         return false;
     }
 
-    if (!down) {
-        // 抬起：Hold 立即抬起；其它动作等待计时器完成
-        for (int i = 0; i < m_actions.size(); ++i) {
-            if (m_actions[i].vk != vk) {
-                continue;
-            }
-            if (m_actions[i].type == BindingAction::Hold && !m_actions[i].waitingRelease) {
-                ActiveAction &action = m_actions[i];
-                send(proto::touch(proto::TouchAction::Up, static_cast<quint64>(action.pointerId),
-                                  static_cast<int>(std::lround(action.fromPixel.x())),
-                                  static_cast<int>(std::lround(action.fromPixel.y())),
-                                  m_screenWidth, m_screenHeight));
-                m_actions.removeAt(i);
-                return true;
-            }
-            m_actions[i].waitingRelease = true;
-        }
-        return true;
-    }
-
-    // 按住重复不重复派发
-    for (const ActiveAction &action : m_actions) {
-        if (action.vk == vk) {
-            return true;
-        }
-    }
-
     ActiveAction action;
     action.vk = vk;
-    action.type = binding->action;
     action.pointerId = allocatePointer(vk);
-    action.fromPixel = toPixel(binding->center);
-    action.toPixel = toPixel(binding->slideTo);
-    action.downSent = true;
-
+    // 按下位置做拟人化微抖动，避免触点长期固定在同一像素。
     const int jitterX = m_humanizer ? m_humanizer->jitter() : 0;
     const int jitterY = m_humanizer ? m_humanizer->jitter() : 0;
-    const QPointF start = action.fromPixel + QPointF(jitterX, jitterY);
+    action.fromPixel = toPixel(binding->center) + QPointF(jitterX, jitterY);
 
-    switch (action.type) {
-    case BindingAction::Hold:
-        action.holding = true;
-        send(proto::touch(proto::TouchAction::Down, static_cast<quint64>(action.pointerId),
-                          static_cast<int>(std::lround(start.x())),
-                          static_cast<int>(std::lround(start.y())), m_screenWidth, m_screenHeight));
-        break;
-    case BindingAction::Tap: {
-        const int duration = m_humanizer ? m_humanizer->tapDurationMs() : 50;
-        action.durationMs = duration;
-        action.elapsedMs = 0;
-        action.fromPixel = start;
-        send(proto::touch(proto::TouchAction::Down, static_cast<quint64>(action.pointerId),
-                          static_cast<int>(std::lround(start.x())),
-                          static_cast<int>(std::lround(start.y())), m_screenWidth, m_screenHeight));
-        break;
-    }
-    case BindingAction::Double: {
-        const int duration = m_humanizer ? m_humanizer->tapDurationMs() : 50;
-        action.durationMs = duration * 2 + 60;
-        action.moveStep = 0;
-        action.fromPixel = start;
-        send(proto::touch(proto::TouchAction::Down, static_cast<quint64>(action.pointerId),
-                          static_cast<int>(std::lround(start.x())),
-                          static_cast<int>(std::lround(start.y())), m_screenWidth, m_screenHeight));
-        break;
-    }
-    case BindingAction::Slide: {
-        const QPointF delta = action.toPixel - action.fromPixel;
-        const int distance = static_cast<int>(std::hypot(delta.x(), delta.y()));
-        action.totalSteps = m_humanizer ? m_humanizer->moveSteps(distance) : 3;
-        action.durationMs = std::max(60, 40 + distance / 4);
-        action.elapsedMs = 0;
-        action.moveStep = 0;
-        action.fromPixel = start;
-        send(proto::touch(proto::TouchAction::Down, static_cast<quint64>(action.pointerId),
-                          static_cast<int>(std::lround(start.x())),
-                          static_cast<int>(std::lround(start.y())), m_screenWidth, m_screenHeight));
-        break;
-    }
-    }
-
+    send(proto::touch(proto::TouchAction::Down, static_cast<quint64>(action.pointerId),
+                      static_cast<int>(std::lround(action.fromPixel.x())),
+                      static_cast<int>(std::lround(action.fromPixel.y())), m_screenWidth,
+                      m_screenHeight));
     m_actions.append(action);
     return true;
 }
 
 bool KeymapEngine::handleWheel(int delta, const std::function<void(const QByteArray &)> &send) {
-    const QPointF center = QPointF(m_screenWidth * 0.5, m_screenHeight * 0.5);
-    send(proto::scroll(static_cast<int>(center.x()), static_cast<int>(center.y()), m_screenWidth,
-                       m_screenHeight, 0.0f, static_cast<float>(delta)));
+    if (delta == 0) {
+        return false;
+    }
+    const int vk = delta > 0 ? kVkWheelUp : kVkWheelDown;
+    const KeyBinding *binding = nullptr;
+    for (const KeyBinding &b : m_bindings) {
+        if (b.vk == vk) {
+            binding = &b;
+            break;
+        }
+    }
+    if (!binding) {
+        // 未绑定滚轮：不注入居中滚动。手机端会把滚动当成多指手势，与视角单指拖动冲突，
+        // 导致滚轮后视角不再响应。
+        return false;
+    }
+    // 快速滚动时避免堆积占满 pointer 池（每个滚轮点按占用一个触点）。
+    if (m_wheelPresses.size() >= 8) {
+        return true;
+    }
+
+    WheelPress press;
+    press.pointerId = allocatePointer(vk);
+    const int jitterX = m_humanizer ? m_humanizer->jitter() : 0;
+    const int jitterY = m_humanizer ? m_humanizer->jitter() : 0;
+    press.pixel = toPixel(binding->center) + QPointF(jitterX, jitterY);
+    press.remainingMs = 50; // 滚轮没有抬起事件：短按后由 tick 补发抬起
+    send(proto::touch(proto::TouchAction::Down, static_cast<quint64>(press.pointerId),
+                      static_cast<int>(std::lround(press.pixel.x())),
+                      static_cast<int>(std::lround(press.pixel.y())), m_screenWidth,
+                      m_screenHeight));
+    m_wheelPresses.append(press);
     return true;
 }
 
 bool KeymapEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &send) {
     bool emitted = false;
-    for (int i = 0; i < m_actions.size();) {
-        ActiveAction &action = m_actions[i];
-        if (action.holding) {
+    for (int i = 0; i < m_wheelPresses.size();) {
+        m_wheelPresses[i].remainingMs -= dtMs;
+        if (m_wheelPresses[i].remainingMs > 0) {
             ++i;
             continue;
         }
-
-        action.elapsedMs += dtMs;
-
-        if (action.type == BindingAction::Tap) {
-            if (action.elapsedMs >= action.durationMs) {
-                send(proto::touch(proto::TouchAction::Up, static_cast<quint64>(action.pointerId),
-                                  static_cast<int>(std::lround(action.fromPixel.x())),
-                                  static_cast<int>(std::lround(action.fromPixel.y())),
-                                  m_screenWidth, m_screenHeight));
-                m_actions.removeAt(i);
-                emitted = true;
-                continue;
-            }
-        } else if (action.type == BindingAction::Double) {
-            const int half = action.durationMs / 2;
-            if (action.moveStep == 0 && action.elapsedMs >= half) {
-                send(proto::touch(proto::TouchAction::Up, static_cast<quint64>(action.pointerId),
-                                  static_cast<int>(std::lround(action.fromPixel.x())),
-                                  static_cast<int>(std::lround(action.fromPixel.y())),
-                                  m_screenWidth, m_screenHeight));
-                action.moveStep = 1;
-                action.nextStepAtMs = action.elapsedMs + 60;
-            } else if (action.moveStep == 1 && action.elapsedMs >= action.nextStepAtMs) {
-                send(proto::touch(proto::TouchAction::Down, static_cast<quint64>(action.pointerId),
-                                  static_cast<int>(std::lround(action.fromPixel.x())),
-                                  static_cast<int>(std::lround(action.fromPixel.y())),
-                                  m_screenWidth, m_screenHeight));
-                action.moveStep = 2;
-            } else if (action.moveStep >= 2 && action.elapsedMs >= action.durationMs) {
-                send(proto::touch(proto::TouchAction::Up, static_cast<quint64>(action.pointerId),
-                                  static_cast<int>(std::lround(action.fromPixel.x())),
-                                  static_cast<int>(std::lround(action.fromPixel.y())),
-                                  m_screenWidth, m_screenHeight));
-                m_actions.removeAt(i);
-                emitted = true;
-                continue;
-            }
-        } else if (action.type == BindingAction::Slide) {
-            const double progress =
-                std::clamp(action.elapsedMs / static_cast<double>(action.durationMs), 0.0, 1.0);
-            const int expectedStep = static_cast<int>(progress * action.totalSteps);
-            if (expectedStep > action.moveStep) {
-                action.moveStep = expectedStep;
-                const double eased = easeOutCubic(progress);
-                QPointF pos = action.fromPixel + (action.toPixel - action.fromPixel) * eased;
-                if (action.moveStep < action.totalSteps && m_humanizer) {
-                    pos += QPointF(m_humanizer->jitter(), m_humanizer->jitter());
-                }
-                send(proto::touch(proto::TouchAction::Move,
-                                  static_cast<quint64>(action.pointerId),
-                                  static_cast<int>(std::lround(pos.x())),
-                                  static_cast<int>(std::lround(pos.y())), m_screenWidth,
-                                  m_screenHeight));
-                emitted = true;
-            }
-            if (action.elapsedMs >= action.durationMs) {
-                send(proto::touch(proto::TouchAction::Up, static_cast<quint64>(action.pointerId),
-                                  static_cast<int>(std::lround(action.toPixel.x())),
-                                  static_cast<int>(std::lround(action.toPixel.y())), m_screenWidth,
-                                  m_screenHeight));
-                m_actions.removeAt(i);
-                emitted = true;
-                continue;
-            }
-        }
-        ++i;
+        const WheelPress &press = m_wheelPresses.at(i);
+        send(proto::touch(proto::TouchAction::Up, static_cast<quint64>(press.pointerId),
+                          static_cast<int>(std::lround(press.pixel.x())),
+                          static_cast<int>(std::lround(press.pixel.y())), m_screenWidth,
+                          m_screenHeight));
+        m_wheelPresses.removeAt(i);
+        emitted = true;
     }
     return emitted;
 }
@@ -572,7 +499,16 @@ void KeymapEngine::releaseAll(const std::function<void(const QByteArray &)> &sen
                           static_cast<int>(std::lround(action.fromPixel.x())),
                           static_cast<int>(std::lround(action.fromPixel.y())), m_screenWidth,
                           m_screenHeight));
+        // 键仍可能物理按住：记录后忽略其自动重复，避免抬起后又自动按下。
+        m_suspendedVks.insert(action.vk);
     }
+    for (const WheelPress &press : m_wheelPresses) {
+        send(proto::touch(proto::TouchAction::Up, static_cast<quint64>(press.pointerId),
+                          static_cast<int>(std::lround(press.pixel.x())),
+                          static_cast<int>(std::lround(press.pixel.y())), m_screenWidth,
+                          m_screenHeight));
+    }
+    m_wheelPresses.clear();
     m_actions.clear();
 }
 
@@ -618,6 +554,7 @@ void InputEngine::applyJoystickConfig() {
     m_joystick.configure(m_profile.joystickCenter, m_profile.joystickRadius,
                          m_profile.joystickDeadzone, m_profile.joystickCurve, m_screenWidth,
                          m_screenHeight);
+    m_joystick.setSprintRadius(m_profile.joystickSprintRadius);
     m_look.configure(m_profile.lookCenter, m_profile.lookRadius, m_profile.lookSensitivity,
                      m_profile.lookCountsPer180, m_screenWidth, m_screenHeight);
     m_keymap.configure(m_profile.bindings, m_screenWidth, m_screenHeight);
@@ -654,6 +591,11 @@ void InputEngine::handleInput(const InputEvent &event) {
         }
     }
 
+    // 指针模式：鼠标用于移动系统光标点击手机 UI，位移不再驱动视角
+    if (!m_lookEnabled && event.type == InputEventType::MouseMove) {
+        return;
+    }
+
     // 呼出键不参与映射：其按下/抬起不进入键位引擎
     int eventVk = 0;
     if (event.type == InputEventType::Key) {
@@ -667,16 +609,30 @@ void InputEngine::handleInput(const InputEvent &event) {
 
     // WASD → 摇杆方向键状态（基础版核心走位，不依赖键位方案）
     if (event.type == InputEventType::Key) {
-        bool wasd = true;
         switch (event.vk) {
-        case 'W': m_joyUp = event.down; break;
-        case 'S': m_joyDown = event.down; break;
-        case 'A': m_joyLeft = event.down; break;
-        case 'D': m_joyRight = event.down; break;
-        default: wasd = false; break;
-        }
-        if (wasd) {
+        case 'W':
+        case 'S':
+        case 'A':
+        case 'D': {
+            if (event.down && m_suspendedWasd.contains(event.vk)) {
+                // releaseAll 已抬起摇杆，物理键仍按住：忽略自动重复，等待松开
+                return;
+            }
+            if (!event.down) {
+                m_suspendedWasd.remove(event.vk);
+            }
+            switch (event.vk) {
+            case 'W': m_joyUp = event.down; break;
+            case 'S': m_joyDown = event.down; break;
+            case 'A': m_joyLeft = event.down; break;
+            case 'D': m_joyRight = event.down; break;
+            default: break;
+            }
             m_joystick.setKeys(m_joyUp, m_joyDown, m_joyLeft, m_joyRight);
+            break;
+        }
+        default:
+            break;
         }
     }
 
@@ -721,10 +677,28 @@ void InputEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &
 }
 
 void InputEngine::releaseAll(const std::function<void(const QByteArray &)> &send) {
+    // 记录仍物理按住的 WASD：抬起摇杆后忽略其自动重复，等待松开后再恢复走位。
+    if (m_joyUp) {
+        m_suspendedWasd.insert('W');
+    }
+    if (m_joyDown) {
+        m_suspendedWasd.insert('S');
+    }
+    if (m_joyLeft) {
+        m_suspendedWasd.insert('A');
+    }
+    if (m_joyRight) {
+        m_suspendedWasd.insert('D');
+    }
     m_joyUp = m_joyDown = m_joyLeft = m_joyRight = false;
     m_joystick.release(send);
     m_look.release(send);
     m_keymap.releaseAll(send);
+}
+
+void InputEngine::clearSuspendedKeys() {
+    m_suspendedWasd.clear();
+    m_keymap.clearSuspended();
 }
 
 double InputEngine::takeLatencyMs() {

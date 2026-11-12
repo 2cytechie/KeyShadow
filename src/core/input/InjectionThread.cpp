@@ -102,6 +102,11 @@ void InjectionThread::setTouchDragActive(bool active) {
     m_touchDrag = active;
 }
 
+void InjectionThread::setSprint(bool active) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_sprint = active;
+}
+
 void InjectionThread::sendMessage(const QByteArray &message) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_outbox.append(message);
@@ -169,6 +174,7 @@ void InjectionThread::loop() {
     int screenHeight = m_screenHeight;
     bool directTouch = false;
     bool touchDrag = false;
+    bool sprint = false;
 
     qint64 previous = qpcNow();
     double accumulator = 0.0;
@@ -210,10 +216,16 @@ void InjectionThread::loop() {
             }
             directTouch = m_directTouch;
             touchDrag = m_touchDrag;
+            sprint = m_sprint;
         }
 
         m_engine.setDirectTouchEnabled(directTouch);
         m_engine.setTouchDragActive(touchDrag);
+        m_engine.setSprint(sprint);
+        m_engine.setLookEnabled(m_lookEnabled.load());
+        if (m_clearSuspended.exchange(false)) {
+            m_engine.clearSuspendedKeys();
+        }
 
         if (hasProfile) {
             m_engine.setProfile(profile);

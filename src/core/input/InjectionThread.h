@@ -40,6 +40,12 @@ public:
     /// 窗口态直操：屏蔽 Raw Input 左键映射与拖动期视角注入。
     void setDirectTouchEnabled(bool enabled);
     void setTouchDragActive(bool active);
+    /// 疾跑开关（Session 主线程按疾跑键状态转发）。
+    void setSprint(bool active);
+    /// 指针模式：鼠标位移不驱动视角（键盘/其它鼠标键仍映射）。
+    void setLookEnabled(bool enabled) { m_lookEnabled.store(enabled); }
+    /// 清空「已抬起但物理仍按住」的按键集合。
+    void clearSuspendedKeys() { m_clearSuspended.store(true); }
     void sendMessage(const QByteArray &message);
     void releaseAll();
 
@@ -60,6 +66,8 @@ private:
     std::atomic<qint64> m_releaseRequested{0};
     std::atomic<int> m_calibrationRequest{0};
     std::atomic<int> m_ignoredKey{0};
+    std::atomic<bool> m_lookEnabled{true};
+    std::atomic<bool> m_clearSuspended{false};
 
     mutable std::mutex m_mutex;
     QVector<InputEvent> m_events;
@@ -72,6 +80,7 @@ private:
     qint64 m_calibratedCounts = 0;
     bool m_directTouch = false;
     bool m_touchDrag = false;
+    bool m_sprint = false;
 
     quintptr m_socket = 0;
     int m_screenWidth = 1080;

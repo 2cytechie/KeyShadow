@@ -26,22 +26,26 @@ public:
 signals:
     void summonKeyChanged(int vk);
     void summonModeChanged(const QString &mode);
+    void statsOverlayChanged(bool enabled);
+    void sprintKeyChanged(int vk);
+    void sprintModeChanged(const QString &mode);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void showEvent(QShowEvent *event) override;
 
 private:
+    enum class ListenTarget { Summon, Sprint };
+
     QWidget *buildSection(const QString &title);
     void addRow(QWidget *section, const QString &label, QWidget *control);
     void syncFromProfile();
     void storeProfile();
 
-    void startSummonListen();
-    void stopSummonListen();
-    void handleSummonCandidate(int vk);
-    void refreshSummonButton();
-    void updateSummonModeHint();
+    void startListen(ListenTarget target);
+    void stopListen();
+    void handleListenCandidate(int vk);
+    void refreshListenButtons();
 
     Session *m_session = nullptr;
     QComboBox *m_resolutionCombo = nullptr;
@@ -49,16 +53,22 @@ private:
     QComboBox *m_bitrateCombo = nullptr;
     QCheckBox *m_audioCheck = nullptr;
     QCheckBox *m_screenOffCheck = nullptr;
+    QCheckBox *m_statsOverlayCheck = nullptr;
     QLabel *m_humanizerStatus = nullptr;
     QLabel *m_licenseLabel = nullptr;
     QPushButton *m_summonButton = nullptr;
     QPushButton *m_summonModeLongPress = nullptr;
     QPushButton *m_summonModeHold = nullptr;
     QButtonGroup *m_summonModeGroup = nullptr;
-    QLabel *m_summonModeHint = nullptr;
     QLabel *m_summonStatus = nullptr;
-    QTimer *m_summonTimer = nullptr;
+    QPushButton *m_sprintButton = nullptr;
+    QPushButton *m_sprintModeSwitch = nullptr;
+    QPushButton *m_sprintModeHold = nullptr;
+    QButtonGroup *m_sprintModeGroup = nullptr;
+    QTimer *m_listenTimer = nullptr;
     int m_summonKey = 0x12;
+    int m_sprintKey = 0x10;
+    ListenTarget m_listenTarget = ListenTarget::Summon;
     bool m_listening = false;
     bool m_captureWasEnabled = false;
     bool m_syncing = false;

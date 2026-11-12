@@ -84,9 +84,10 @@ int KeymapOverlay::hitTest(const QPoint &pos) const {
 }
 
 int KeymapOverlay::hitTestRegion(const QPoint &pos) const {
+    // 轮盘按疾跑大圆命中（大圆包住小圆）。
     const QPointF joystick = toWidget(m_profile.joystickCenter);
-    const double joystickRadius = std::max(12.0, pixelRadius(m_profile.joystickRadius));
-    if (QLineF(joystick, pos).length() <= joystickRadius) {
+    const double joystickOuter = std::max(12.0, pixelRadius(m_profile.joystickSprintRadius));
+    if (QLineF(joystick, pos).length() <= joystickOuter) {
         return static_cast<int>(Region::Joystick);
     }
     const QPointF look = toWidget(m_profile.lookCenter);
@@ -120,11 +121,19 @@ void KeymapOverlay::setRegionCenter(int region, const QPointF &normalized) {
     }
 }
 
-void KeymapOverlay::setRegionRadius(int region, double radius) {
+void KeymapOverlay::setRegionRadius(int region, double radius, bool sprintOuter) {
     if (region == static_cast<int>(Region::Look)) {
         m_profile.lookRadius = std::clamp(radius, 0.05, 0.45);
     } else if (region == static_cast<int>(Region::Joystick)) {
-        m_profile.joystickRadius = std::clamp(radius, 0.02, 0.30);
+        if (sprintOuter) {
+            // 大圆不小于小圆
+            m_profile.joystickSprintRadius =
+                std::clamp(radius, m_profile.joystickRadius, 0.30);
+        } else {
+            // 小圆不超过大圆
+            m_profile.joystickRadius =
+                std::clamp(radius, 0.02, m_profile.joystickSprintRadius);
+        }
     }
 }
 
@@ -167,16 +176,21 @@ void KeymapOverlay::paintEvent(QPaintEvent *event) {
     painter.drawText(QPointF(lookCenter.x() - 26, lookCenter.y() - lookRy - 6),
                      QStringLiteral("视角触发区"));
 
-    // 摇杆
+    // 摇杆：外圆=疾跑（虚线），内圆=普通滑动上限（实线+十字）
     const QPointF joystickCenter = toWidget(m_profile.joystickCenter);
+    const double joystickOuter = pixelRadius(m_profile.joystickSprintRadius);
     const double joystickRadius = pixelRadius(m_profile.joystickRadius);
     const bool joystickSelected = m_selectedRegion == Region::Joystick;
     QColor joystickStroke =
         joystickSelected ? Theme::brandPrimary() : Theme::color(QStringLiteral("border-strong"));
+    QColor joystickFill = Theme::brandPrimary();
+    joystickFill.setAlpha(joystickSelected ? 26 : 10);
+    painter.setPen(QPen(joystickStroke, joystickSelected ? 2.0 : 1, Qt::DashLine));
+    painter.setBrush(joystickFill);
+    painter.drawEllipse(joystickCenter, joystickOuter, joystickOuter);
+    joystickFill.setAlpha(joystickSelected ? 40 : 18);
     painter.setPen(QPen(joystickStroke, joystickSelected ? 2.5 : 1,
                         joystickSelected ? Qt::SolidLine : Qt::DashLine));
-    QColor joystickFill = Theme::brandPrimary();
-    joystickFill.setAlpha(joystickSelected ? 40 : 18);
     painter.setBrush(joystickFill);
     painter.drawEllipse(joystickCenter, joystickRadius, joystickRadius);
     painter.setPen(QPen(Theme::brandPrimary(), 1.5));
@@ -185,7 +199,7 @@ void KeymapOverlay::paintEvent(QPaintEvent *event) {
     painter.drawLine(QPointF(joystickCenter.x(), joystickCenter.y() - 8),
                      QPointF(joystickCenter.x(), joystickCenter.y() + 8));
     painter.setPen(Theme::textSecondary());
-    painter.drawText(QPointF(joystickCenter.x() - 18, joystickCenter.y() + joystickRadius + 16),
+    painter.drawText(QPointF(joystickCenter.x() - 18, joystickCenter.y() + joystickOuter + 16),
                      QStringLiteral("摇杆"));
 
     // 键位
@@ -344,7 +358,12 @@ void KeymapOverlay::wheelEvent(QWheelEvent *event) {
     if (m_selectedRegion != Region::None) {
         const int region = static_cast<int>(m_selectedRegion);
         const double steps = event->angleDelta().y() / 120.0;
-        setRegionRadius(region, regionRadius(region) + steps * 0.005);
+        const bool joystick = region == static_cast<int>(Region::Joystick);
+        // Ctrl+滚轮调疾跑大圆，普通滚轮调小圆/视角区域。
+        const bool outer = joystick && (event->modifiers() & Qt::ControlModifier);
+        double current = outer ? m_profile.joystickSprintRadius
+                               : (joystick ? m_profile.joystickRadius : m_profile.lookRadius);
+        setRegionRadius(region, current + steps * 0.005, outer);
         update();
         emit regionResized(region);
         emit regionEdited();

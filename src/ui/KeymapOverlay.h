@@ -57,7 +57,8 @@ private:
     QPointF regionCenter(int region) const;
     double regionRadius(int region) const;
     void setRegionCenter(int region, const QPointF &normalized);
-    void setRegionRadius(int region, double radius);
+    /// sprintOuter=true 调整轮盘疾跑大圆，否则为普通小圆（视角区域忽略该参数）。
+    void setRegionRadius(int region, double radius, bool sprintOuter);
 
     Profile m_profile;
     int m_selected = -1;

@@ -89,6 +89,19 @@ bool RawInputFilter::nativeEventFilter(const QByteArray &eventType, void *messag
         if (flags & RI_MOUSE_MIDDLE_BUTTON_UP) {
             emitButton(2, false);
         }
+        // 鼠标侧键：3 = XBUTTON1（后退），4 = XBUTTON2（前进），与 Qt BackButton/ForwardButton 对应
+        if (flags & RI_MOUSE_BUTTON_4_DOWN) {
+            emitButton(3, true);
+        }
+        if (flags & RI_MOUSE_BUTTON_4_UP) {
+            emitButton(3, false);
+        }
+        if (flags & RI_MOUSE_BUTTON_5_DOWN) {
+            emitButton(4, true);
+        }
+        if (flags & RI_MOUSE_BUTTON_5_UP) {
+            emitButton(4, false);
+        }
         // 滚轮不在此处理：滚轮由投屏画布的 Qt 事件按上下文门控注入（R6）
     } else if (raw.header.dwType == RIM_TYPEKEYBOARD) {
         const RAWKEYBOARD &keyboard = raw.data.keyboard;
@@ -99,15 +112,16 @@ bool RawInputFilter::nativeEventFilter(const QByteArray &eventType, void *messag
         const bool extended = (keyboard.Flags & RI_KEY_E0) != 0;
 
         int vk = keyboard.VKey;
-        // 左右 Ctrl/Alt 区分
-        if (vk == VK_CONTROL) {
-            vk = extended ? VK_RCONTROL : VK_LCONTROL;
-        } else if (vk == VK_MENU) {
-            vk = extended ? VK_RMENU : VK_LMENU;
-        } else if (vk == VK_SHIFT) {
-            const UINT scancode = MapVirtualKey(VK_SHIFT, MAPVK_VK_TO_VSC);
-            vk = (keyboard.MakeCode == scancode) ? VK_LSHIFT : VK_RSHIFT;
+        // 左右修饰键归一化为通用 VK：键位捕获（Qt）存的是通用 VK_SHIFT/VK_CONTROL/VK_MENU，
+        // 注入侧按通用 VK 精确匹配；不归一化会导致 Shift/Ctrl/Alt 绑定永不命中。
+        if (vk == VK_LSHIFT || vk == VK_RSHIFT) {
+            vk = VK_SHIFT;
+        } else if (vk == VK_LCONTROL || vk == VK_RCONTROL) {
+            vk = VK_CONTROL;
+        } else if (vk == VK_LMENU || vk == VK_RMENU) {
+            vk = VK_MENU;
         }
+        Q_UNUSED(extended);
 
         InputEvent event;
         event.type = InputEventType::Key;

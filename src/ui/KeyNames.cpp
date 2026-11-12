@@ -4,9 +4,17 @@
 
 #include <qt_windows.h>
 
+#include "core/engine/Engines.h"
+
 namespace ks::ui {
 
 QString vkName(int vk) {
+    if (vk == ks::kVkWheelUp) {
+        return QStringLiteral("滚轮上");
+    }
+    if (vk == ks::kVkWheelDown) {
+        return QStringLiteral("滚轮下");
+    }
     if (vk >= 'A' && vk <= 'Z') {
         return QString(QChar(vk));
     }
@@ -20,6 +28,8 @@ QString vkName(int vk) {
     case VK_LBUTTON: return QStringLiteral("左键");
     case VK_RBUTTON: return QStringLiteral("右键");
     case VK_MBUTTON: return QStringLiteral("中键");
+    case VK_XBUTTON1: return QStringLiteral("侧键1（后退）");
+    case VK_XBUTTON2: return QStringLiteral("侧键2（前进）");
     case VK_SPACE: return QStringLiteral("Space");
     case VK_SHIFT: return QStringLiteral("Shift");
     case VK_LSHIFT: return QStringLiteral("左 Shift");

@@ -236,6 +236,14 @@ void MainWindow::buildPages(QWidget *body, QHBoxLayout *layout) {
             &ConsolePage::setSummonMode);
     connect(m_session, &Session::summonKeyPressed, m_console,
             &ConsolePage::onSummonKeyPressed);
+    connect(settingsPage, &SettingsPage::statsOverlayChanged, m_console,
+            &ConsolePage::setStatsOverlayEnabled);
+    connect(settingsPage, &SettingsPage::sprintKeyChanged, this, [this](int vk) {
+        m_session->setSprintKey(vk);
+        showToast(QStringLiteral("疾跑键已改为 %1").arg(vkName(vk)));
+    });
+    connect(settingsPage, &SettingsPage::sprintModeChanged, m_session, &Session::setSprintMode);
+    connect(m_session, &Session::sprintToggled, m_console, &ConsolePage::onSprintToggled);
 
     m_console->setSummonKey(m_session->summonKey());
 

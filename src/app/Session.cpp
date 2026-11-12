@@ -22,6 +22,9 @@ Session::Session(QObject *parent) : QObject(parent) {
     QSettings settings;
     m_summonKey = settings.value(QStringLiteral("input/summonKey"), 0x12).toInt();
     m_injection.setIgnoredKey(m_summonKey);
+    m_sprintKey = settings.value(QStringLiteral("input/sprintKey"), 0x10).toInt();
+    m_sprintMode = settings.value(QStringLiteral("input/sprintMode"), QStringLiteral("hold"))
+                       .toString();
 
     connect(&m_client, &ScrcpyClient::connecting, this, [this](const QString &stage) {
         setState(State::Connecting, stage);
@@ -246,6 +249,8 @@ void Session::disconnectDevice() {
     if (m_rawInput) {
         m_rawInput->setEnabled(false);
     }
+    m_summonDown = false;
+    resetSprint();
     m_client.stop();
     stopStreams();
     m_deviceName.clear();
@@ -305,7 +310,11 @@ void Session::reloadProfiles() {
 
 void Session::applyProfile(const Profile &profile, bool persist) {
     m_profile = profile;
-    // 拟人化为 Pro 自动能力：不读取方案偏好，注入侧按授权统一决定。
+    if (!LicenseManager::instance().isPro() && m_profile.maxFps > 60) {
+        // 90/120fps 为付费功能：未激活时统一钳制到 60（导入方案/旧文件兜底）。
+        m_profile.maxFps = 60;
+    }
+    // 拟人化为付费能力：不读取方案偏好，注入侧按授权统一决定。
     Profile injected = m_profile;
     const bool pro = LicenseManager::instance().isPro();
     injected.humanizerEnabled = pro;
@@ -328,7 +337,12 @@ void Session::attachInputWindow(quintptr hwnd) {
             if (event.type == InputEventType::Key) {
                 vk = event.vk;
             } else if (event.type == InputEventType::MouseButton) {
-                vk = event.button == 0 ? 0x01 : event.button == 1 ? 0x02 : 0x04;
+                vk = mouseButtonVk(event.button);
+            }
+            // 疾跑键不参与键位映射：主线程拦截，转发注入侧摇杆疾跑状态。
+            if (vk && vkMatchesSummon(vk, m_sprintKey)) {
+                handleSprintKey(event.down);
+                return;
             }
             if (vk && vkMatchesSummon(vk, m_summonKey)) {
                 if (event.down != m_summonDown) {
@@ -345,6 +359,51 @@ void Session::attachInputWindow(quintptr hwnd) {
     m_rawInput->attachTo(hwnd);
 }
 
+void Session::setSprintKey(int vk) {
+    if (m_sprintKey == vk) {
+        return;
+    }
+    m_sprintKey = vk;
+    m_sprintRawDown = false;
+    QSettings().setValue(QStringLiteral("input/sprintKey"), vk);
+}
+
+void Session::setSprintMode(const QString &mode) {
+    const QString next = mode == QStringLiteral("switch") ? QStringLiteral("switch")
+                                                         : QStringLiteral("hold");
+    if (m_sprintMode == next) {
+        return;
+    }
+    m_sprintMode = next;
+    QSettings().setValue(QStringLiteral("input/sprintMode"), next);
+    // 切换方式时复位疾跑状态，避免「按住→切换」后疾跑卡在开启。
+    resetSprint();
+}
+
+void Session::handleSprintKey(bool down) {
+    if (m_sprintMode == QStringLiteral("switch")) {
+        // 按下边沿翻转：Raw 键盘自动重复会产生连续 down，需记录原始按下状态去抖。
+        if (down && !m_sprintRawDown) {
+            m_sprintActive = !m_sprintActive;
+            m_injection.setSprint(m_sprintActive);
+            emit sprintToggled(m_sprintActive);
+        }
+    } else if (m_sprintActive != down) {
+        m_sprintActive = down;
+        m_injection.setSprint(down);
+        emit sprintToggled(down);
+    }
+    m_sprintRawDown = down;
+}
+
+void Session::resetSprint() {
+    if (m_sprintActive || m_sprintRawDown) {
+        m_sprintActive = false;
+        m_sprintRawDown = false;
+        m_injection.setSprint(false);
+    }
+}
+
 void Session::setSummonKey(int vk) {
     if (m_summonKey == vk) {
         return;
@@ -358,12 +417,17 @@ void Session::setSummonKey(int vk) {
 void Session::postInputEvent(const InputEvent &event) { m_injection.postInput(event); }
 
 void Session::setInputCaptureEnabled(bool enabled) {
+    const bool wasEnabled = inputCaptureEnabled();
     if (m_rawInput) {
         m_rawInput->setEnabled(enabled);
     }
     if (!enabled) {
         m_summonDown = false;
+        resetSprint();
         m_injection.releaseAll();
+    } else if (!wasEnabled) {
+        // 重新开始捕获：物理按键状态未知，清空「等待松开」集合，按住中的键可恢复。
+        m_injection.clearSuspendedKeys();
     }
 }
 
@@ -378,12 +442,15 @@ void Session::setDirectTouchEnabled(bool enabled) {
     m_directTouchEnabled = enabled;
     m_injection.setDirectTouchEnabled(enabled);
     if (enabled) {
-        // 进入直操前释放可能已按下的映射动作（如左键 Hold），避免手机端触点卡住。
+        // 进入直操前释放可能已按下的映射动作（如按住的键位触点），避免手机端触点卡住。
+        resetSprint();
         m_injection.releaseAll();
     }
 }
 
 void Session::setTouchDragActive(bool active) { m_injection.setTouchDragActive(active); }
+
+void Session::setLookEnabled(bool enabled) { m_injection.setLookEnabled(enabled); }
 
 void Session::setScreenOff(bool off) {
     m_screenOff = off;

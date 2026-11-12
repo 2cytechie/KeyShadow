@@ -67,10 +67,18 @@ public:
     void setDirectTouchEnabled(bool enabled);
     /// 画布触控拖动按下/抬起时同步，拖动期间暂停鼠标视角注入。
     void setTouchDragActive(bool active);
+    /// 指针模式：鼠标位移不驱动视角，键盘/其它鼠标键仍映射。
+    void setLookEnabled(bool enabled);
 
     /// 呼出鼠标键（Windows VK，默认 Alt）。呼出键不参与键位映射。
     void setSummonKey(int vk);
     int summonKey() const { return m_summonKey; }
+
+    /// 疾跑键（Windows VK，默认 Shift）。疾跑键不参与键位映射，由主线程拦截转发注入侧。
+    void setSprintKey(int vk);
+    int sprintKey() const { return m_sprintKey; }
+    /// 疾跑触发方式："hold" 按住生效 / "switch" 按下切换。
+    void setSprintMode(const QString &mode);
 
     /// 向注入线程投递一个输入事件（Qt 滚轮路径使用）。
     void postInputEvent(const InputEvent &event);
@@ -95,6 +103,7 @@ signals:
     void calibrationFinished(qint64 counts);
     void profileChanged(ks::Profile profile);
     void summonKeyPressed(bool down);
+    void sprintToggled(bool active);
 
 private:
     void setState(State state, const QString &message);
@@ -108,6 +117,8 @@ private:
     void onAudioPacket(const QByteArray &payload);
     void updateStats();
     void handleStreamClosed(const QString &source, const QString &reason);
+    void handleSprintKey(bool down);
+    void resetSprint();
 
     AdbProcess m_adb;
     ScrcpyClient m_client;
@@ -149,6 +160,10 @@ private:
     bool m_screenOff = false;
     int m_summonKey = 0x12; ///< VK_MENU
     bool m_summonDown = false;
+    int m_sprintKey = 0x10; ///< VK_SHIFT
+    QString m_sprintMode = QStringLiteral("hold");
+    bool m_sprintActive = false;
+    bool m_sprintRawDown = false;
     bool m_directTouchEnabled = false;
 };
 

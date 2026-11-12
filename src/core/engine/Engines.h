@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QPointF>
+#include <QSet>
 #include <QString>
 #include <QVector>
 #include <functional>
@@ -11,6 +12,13 @@ namespace ks {
 
 /// 判定事件虚拟键码是否匹配配置的呼出键：通用修饰键（Shift/Ctrl/Alt）匹配左右变体。
 bool vkMatchesSummon(int eventVk, int summonVk);
+
+/// Raw Input 鼠标按钮序号 → Windows VK（0 左键 1 右键 2 中键 3 侧键1 4 侧键2）。
+int mouseButtonVk(int button);
+
+/// 自定义虚拟键：鼠标滚轮上/下（Windows VK 表中无对应项，仅用于键位绑定）。
+constexpr int kVkWheelUp = 0x0A;
+constexpr int kVkWheelDown = 0x0B;
 
 // ---------------------------------------------------------------------------
 // 输入事件（由 RawInputFilter 产生，主线程投递到注入线程）
@@ -30,14 +38,11 @@ struct InputEvent {
 // ---------------------------------------------------------------------------
 // 键位方案
 // ---------------------------------------------------------------------------
-enum class BindingAction { Tap, Hold, Slide, Double };
-
+/// 键位直通语义：按下 = 手指按下，抬起 = 手指抬起；多键同按 = 多指（每个绑定独立 pointerId）。
 struct KeyBinding {
     int vk = 0;                        ///< 触发键（Windows VK）
-    BindingAction action = BindingAction::Tap;
     QPointF center{0.5, 0.5};          ///< 归一化坐标（0..1）
     double radius = 0.05;              ///< 归一化半径（按钮尺寸）
-    QPointF slideTo{0.5, 0.5};         ///< Slide 动作终点（归一化）
 };
 
 struct Profile {
@@ -45,6 +50,7 @@ struct Profile {
 
     QPointF joystickCenter{0.140, 0.760};
     double joystickRadius = 0.085;
+    double joystickSprintRadius = 0.13; ///< 疾跑大圆半径（≥ joystickRadius）
     double joystickDeadzone = 0.12;
     double joystickCurve = 1.0; ///< 1.0 线性，>1 更细腻
 
@@ -114,6 +120,10 @@ public:
     /// 注入拟人化抖动：每次激活时对区域中心做随机偏移。
     void setHumanizer(HumanizerEngine *humanizer) { m_humanizer = humanizer; }
 
+    /// 疾跑：开启后轮盘触点可滑到大圆（sprintRadius）边缘。
+    void setSprint(bool active) { m_sprint = active; }
+    void setSprintRadius(double radiusNorm);
+
     /// 返回 true 表示产生了事件（写入 send）。
     bool tick(int dtMs, const std::function<void(const QByteArray &)> &send);
 
@@ -123,6 +133,7 @@ public:
 private:
     QPointF m_center{0.14, 0.76};
     double m_radius = 0.085;
+    double m_sprintRadius = 0.13;
     double m_deadzone = 0.12;
     double m_curve = 1.0;
     int m_screenWidth = 1920;
@@ -135,6 +146,7 @@ private:
     bool m_left = false;
     bool m_right = false;
     bool m_active = false;
+    bool m_sprint = false;
     bool m_releasing = false;
     QPointF m_currentPixel; ///< 当前触点像素坐标
     double m_releaseElapsedMs = 0.0;
@@ -179,22 +191,19 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// 键位映射
+// 键位映射（直通：按下=手指按下、抬起=手指抬起）
 // ---------------------------------------------------------------------------
 struct ActiveAction {
     int pointerId = 0;
     int vk = 0;
-    BindingAction type = BindingAction::Tap;
     QPointF fromPixel;
-    QPointF toPixel;
-    qint64 elapsedMs = 0;
-    qint64 durationMs = 0;
-    int moveStep = 0;
-    int totalSteps = 0;
-    int nextStepAtMs = 0;
-    bool holding = false;
-    bool waitingRelease = false;
-    bool downSent = false;
+};
+
+/// 滚轮按下的临时触点：滚轮是离散事件，按下后延时抬起，模拟一次点按。
+struct WheelPress {
+    int pointerId = 0;
+    QPointF pixel;
+    int remainingMs = 0;
 };
 
 class KeymapEngine {
@@ -203,19 +212,23 @@ public:
     void setHumanizer(HumanizerEngine *humanizer) { m_humanizer = humanizer; }
 
     bool handleKey(int vk, bool down, const std::function<void(const QByteArray &)> &send);
+    /// 滚轮只触发已绑定的上/下滚轮键位；未绑定时不注入任何滚动（避免与视角拖动冲突）。
     bool handleWheel(int delta, const std::function<void(const QByteArray &)> &send);
 
     bool tick(int dtMs, const std::function<void(const QByteArray &)> &send);
     void releaseAll(const std::function<void(const QByteArray &)> &send);
+    /// 清空「已抬起但物理仍按住」集合（重新开始捕获时调用）。
+    void clearSuspended() { m_suspendedVks.clear(); }
     bool isBound(int vk) const;
 
 private:
     int allocatePointer(int vk);
-    void releasePointer(int vk, const std::function<void(const QByteArray &)> &send);
     QPointF toPixel(const QPointF &norm) const;
 
     QVector<KeyBinding> m_bindings;
     QVector<ActiveAction> m_actions;
+    QVector<WheelPress> m_wheelPresses;
+    QSet<int> m_suspendedVks; ///< releaseAll 抬起后仍物理按住的键：忽略其自动重复
     int m_screenWidth = 1920;
     int m_screenHeight = 1080;
     int m_nextPointer = 2;
@@ -267,12 +280,19 @@ public:
     void setDirectTouchEnabled(bool enabled) { m_directTouchEnabled = enabled; }
     /// 画布触控拖动进行中：丢弃鼠标位移，避免滑动手机 UI 时视角同时转动。
     void setTouchDragActive(bool active) { m_touchDragActive = active; }
+    /// 指针模式：系统光标用于点击手机 UI，鼠标位移不再驱动视角（键盘/其它鼠标键仍映射）。
+    void setLookEnabled(bool enabled) { m_lookEnabled = enabled; }
+    /// 清空「已抬起但物理仍按住」的按键集合。
+    void clearSuspendedKeys();
 
     SensCalibrator &calibrator() { return m_calibrator; }
     JoystickEngine &joystick() { return m_joystick; }
     LookEngine &look() { return m_look; }
     KeymapEngine &keymap() { return m_keymap; }
     HumanizerEngine &humanizer() { return m_humanizer; }
+
+    /// 疾跑开关：由 Session 主线程按疾跑键状态转发（呼出键/疾跑键不进入键位映射）。
+    void setSprint(bool active) { m_joystick.setSprint(active); }
 
     /// 消费一次「最近输入到发送」的延迟（毫秒），无样本返回 -1。
     double takeLatencyMs();
@@ -294,12 +314,14 @@ private:
     int m_ignoredKey = 0;
     bool m_directTouchEnabled = false;
     bool m_touchDragActive = false;
+    bool m_lookEnabled = true;
 
     // WASD 摇杆按键状态（WASD 固定用于走位，不依赖键位方案）
     bool m_joyUp = false;
     bool m_joyDown = false;
     bool m_joyLeft = false;
     bool m_joyRight = false;
+    QSet<int> m_suspendedWasd; ///< releaseAll 抬起后仍物理按住的 WASD
 };
 
 } // namespace ks

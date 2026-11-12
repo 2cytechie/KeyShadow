@@ -54,7 +54,7 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
 
     m_fpsCombo = new QComboBox(videoSection);
     m_fpsCombo->addItems({QStringLiteral("30 fps"), QStringLiteral("60 fps"),
-                          QStringLiteral("120 fps（Pro）")});
+                          QStringLiteral("90 fps（Pro）"), QStringLiteral("120 fps（Pro）")});
     addRow(videoSection, QStringLiteral("默认帧率"), m_fpsCombo);
 
     m_bitrateCombo = new QComboBox(videoSection);
@@ -65,6 +65,10 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
 
     m_screenOffCheck = new QCheckBox(QStringLiteral("开启息屏投屏（Pro）"), videoSection);
     addRow(videoSection, QStringLiteral("息屏投屏"), m_screenOffCheck);
+
+    m_statsOverlayCheck =
+        new QCheckBox(QStringLiteral("全屏时在画面中上方显示码率 / 帧率 / 延迟"), videoSection);
+    addRow(videoSection, QStringLiteral("全屏信息"), m_statsOverlayCheck);
     layout->addWidget(videoSection);
 
     // 音频
@@ -81,31 +85,21 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     // 输入
     QWidget *inputSection = buildSection(QStringLiteral("输入"));
 
+    // 呼出鼠标：改绑按钮 + 呼出方式两个方框按钮（同行右侧，不再单独一行"呼出方式"）
     auto *summonRow = new QWidget(inputSection);
     auto *summonLayout = new QHBoxLayout(summonRow);
     summonLayout->setContentsMargins(0, 0, 0, 0);
-    summonLayout->setSpacing(10);
+    summonLayout->setSpacing(8);
 
     m_summonButton = new QPushButton(summonRow);
     m_summonButton->setProperty("role", "summonKey");
-    m_summonButton->setFixedSize(180, 34);
+    m_summonButton->setFixedSize(120, 34);
     m_summonButton->setFont(Theme::monoFont(12));
     m_summonButton->setCursor(Qt::PointingHandCursor);
-
-    auto *summonHint = new QLabel(summonRow);
-    summonHint->setProperty("variant", "micro");
-    m_summonModeHint = summonHint;
     summonLayout->addWidget(m_summonButton);
-    summonLayout->addWidget(summonHint);
-    summonLayout->addStretch(1);
-    addRow(inputSection, QStringLiteral("呼出鼠标"), summonRow);
 
-    auto *modeRow = new QWidget(inputSection);
-    auto *modeLayout = new QHBoxLayout(modeRow);
-    modeLayout->setContentsMargins(0, 0, 0, 0);
-    modeLayout->setSpacing(8);
-    m_summonModeLongPress = new QPushButton(QStringLiteral("长按 300ms 呼出"), modeRow);
-    m_summonModeHold = new QPushButton(QStringLiteral("按下呼出 · 抬起返回"), modeRow);
+    m_summonModeLongPress = new QPushButton(QStringLiteral("长按 300ms 呼出"), summonRow);
+    m_summonModeHold = new QPushButton(QStringLiteral("按下呼出 · 抬起返回"), summonRow);
     m_summonModeGroup = new QButtonGroup(this);
     m_summonModeGroup->setExclusive(true);
     for (QPushButton *button : {m_summonModeLongPress, m_summonModeHold}) {
@@ -114,15 +108,51 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
         button->setFixedHeight(34);
         button->setCursor(Qt::PointingHandCursor);
         m_summonModeGroup->addButton(button);
-        modeLayout->addWidget(button);
+        summonLayout->addWidget(button);
     }
-    modeLayout->addStretch(1);
-    addRow(inputSection, QStringLiteral("呼出方式"), modeRow);
+    summonLayout->addStretch(1);
+    addRow(inputSection, QStringLiteral("呼出鼠标"), summonRow);
 
     m_summonStatus = new QLabel(inputSection);
     m_summonStatus->setProperty("state", "warning");
     m_summonStatus->setWordWrap(true);
     addRow(inputSection, QString(), m_summonStatus);
+
+    // 疾跑键：改绑按钮 + 触发方式（切换/按住），布局与呼出鼠标一致
+    auto *sprintRow = new QWidget(inputSection);
+    auto *sprintLayout = new QHBoxLayout(sprintRow);
+    sprintLayout->setContentsMargins(0, 0, 0, 0);
+    sprintLayout->setSpacing(8);
+
+    m_sprintButton = new QPushButton(sprintRow);
+    m_sprintButton->setProperty("role", "summonKey");
+    m_sprintButton->setFixedSize(120, 34);
+    m_sprintButton->setFont(Theme::monoFont(12));
+    m_sprintButton->setCursor(Qt::PointingHandCursor);
+    sprintLayout->addWidget(m_sprintButton);
+
+    m_sprintModeSwitch = new QPushButton(QStringLiteral("切换"), sprintRow);
+    m_sprintModeHold = new QPushButton(QStringLiteral("按住"), sprintRow);
+    m_sprintModeGroup = new QButtonGroup(this);
+    m_sprintModeGroup->setExclusive(true);
+    for (QPushButton *button : {m_sprintModeSwitch, m_sprintModeHold}) {
+        button->setCheckable(true);
+        button->setProperty("role", "option");
+        button->setFixedHeight(34);
+        button->setCursor(Qt::PointingHandCursor);
+        m_sprintModeGroup->addButton(button);
+        sprintLayout->addWidget(button);
+    }
+    sprintLayout->addStretch(1);
+    addRow(inputSection, QStringLiteral("疾跑键"), sprintRow);
+
+    auto *sprintHint = new QLabel(
+        QStringLiteral("疾跑时轮盘可滑到外圈（大圆）；疾跑键不参与键位映射，"
+                       "如需把 Shift 用作技能键，请先在此修改疾跑键。"),
+        inputSection);
+    sprintHint->setProperty("variant", "micro");
+    sprintHint->setWordWrap(true);
+    addRow(inputSection, QString(), sprintHint);
 
     m_humanizerStatus = new QLabel(inputSection);
     m_humanizerStatus->setProperty("variant", "micro");
@@ -177,11 +207,11 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
                 if (m_syncing) {
                     return;
                 }
-                if (index == 2 && !LicenseManager::instance().isPro()) {
+                if (index >= 2 && !LicenseManager::instance().isPro()) {
                     QSignalBlocker blocker(m_fpsCombo);
                     m_fpsCombo->setCurrentIndex(1);
-                    QMessageBox::information(this, QStringLiteral("Pro 功能"),
-                                             QStringLiteral("120 fps 为 Pro 功能，激活后解锁。"));
+                    QMessageBox::information(this, QStringLiteral("付费功能"),
+                                             QStringLiteral("90/120 fps 为付费功能，激活后解锁。"));
                     return;
                 }
                 storeProfile();
@@ -203,6 +233,13 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
         }
         m_session->setScreenOff(checked);
         storeProfile();
+    });
+    connect(m_statsOverlayCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_syncing) {
+            return;
+        }
+        QSettings().setValue(QStringLiteral("display/statsOverlay"), checked);
+        emit statsOverlayChanged(checked);
     });
     connect(activateButton, &QPushButton::clicked, this, [this] {
         bool ok = false;
@@ -230,13 +267,11 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
         settings.value(QStringLiteral("input/summonMode"), QStringLiteral("longPress"))
             .toString() == QStringLiteral("hold");
     (holdMode ? m_summonModeHold : m_summonModeLongPress)->setChecked(true);
-    updateSummonModeHint();
     connect(m_summonModeLongPress, &QPushButton::toggled, this, [this](bool checked) {
         if (!checked || m_syncing) {
             return;
         }
         QSettings().setValue(QStringLiteral("input/summonMode"), QStringLiteral("longPress"));
-        updateSummonModeHint();
         emit summonModeChanged(QStringLiteral("longPress"));
     });
     connect(m_summonModeHold, &QPushButton::toggled, this, [this](bool checked) {
@@ -244,83 +279,122 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
             return;
         }
         QSettings().setValue(QStringLiteral("input/summonMode"), QStringLiteral("hold"));
-        updateSummonModeHint();
         emit summonModeChanged(QStringLiteral("hold"));
     });
-    m_summonTimer = new QTimer(this);
-    m_summonTimer->setSingleShot(true);
-    m_summonTimer->setInterval(5000);
-    connect(m_summonTimer, &QTimer::timeout, this, [this] {
-        stopSummonListen();
+
+    m_sprintKey = settings.value(QStringLiteral("input/sprintKey"), 0x10).toInt();
+    const bool sprintSwitch =
+        settings.value(QStringLiteral("input/sprintMode"), QStringLiteral("hold")).toString() ==
+        QStringLiteral("switch");
+    (sprintSwitch ? m_sprintModeSwitch : m_sprintModeHold)->setChecked(true);
+    connect(m_sprintModeSwitch, &QPushButton::toggled, this, [this](bool checked) {
+        if (!checked || m_syncing) {
+            return;
+        }
+        QSettings().setValue(QStringLiteral("input/sprintMode"), QStringLiteral("switch"));
+        emit sprintModeChanged(QStringLiteral("switch"));
+    });
+    connect(m_sprintModeHold, &QPushButton::toggled, this, [this](bool checked) {
+        if (!checked || m_syncing) {
+            return;
+        }
+        QSettings().setValue(QStringLiteral("input/sprintMode"), QStringLiteral("hold"));
+        emit sprintModeChanged(QStringLiteral("hold"));
+    });
+
+    m_listenTimer = new QTimer(this);
+    m_listenTimer->setSingleShot(true);
+    m_listenTimer->setInterval(5000);
+    connect(m_listenTimer, &QTimer::timeout, this, [this] {
+        stopListen();
         m_summonStatus->setText(QStringLiteral("已取消改绑（5 秒无输入）"));
     });
-    connect(m_summonButton, &QPushButton::clicked, this, &SettingsPage::startSummonListen);
-    refreshSummonButton();
+    connect(m_summonButton, &QPushButton::clicked, this,
+            [this] { startListen(ListenTarget::Summon); });
+    connect(m_sprintButton, &QPushButton::clicked, this,
+            [this] { startListen(ListenTarget::Sprint); });
+    refreshListenButtons();
 
     syncFromProfile();
 }
 
-void SettingsPage::refreshSummonButton() {
-    if (!m_summonButton) {
-        return;
+void SettingsPage::refreshListenButtons() {
+    const QString listeningText = QStringLiteral("请按下新按键…（Esc 取消）");
+    if (m_summonButton) {
+        const bool listening = m_listening && m_listenTarget == ListenTarget::Summon;
+        m_summonButton->setText(listening ? listeningText : vkName(m_summonKey));
+        m_summonButton->setProperty("listening", listening);
+        m_summonButton->style()->unpolish(m_summonButton);
+        m_summonButton->style()->polish(m_summonButton);
     }
-    m_summonButton->setText(m_listening ? QStringLiteral("请按下新按键…（Esc 取消）")
-                                        : vkName(m_summonKey));
-    m_summonButton->setProperty("listening", m_listening);
-    m_summonButton->style()->unpolish(m_summonButton);
-    m_summonButton->style()->polish(m_summonButton);
+    if (m_sprintButton) {
+        const bool listening = m_listening && m_listenTarget == ListenTarget::Sprint;
+        m_sprintButton->setText(listening ? listeningText : vkName(m_sprintKey));
+        m_sprintButton->setProperty("listening", listening);
+        m_sprintButton->style()->unpolish(m_sprintButton);
+        m_sprintButton->style()->polish(m_sprintButton);
+    }
 }
 
-void SettingsPage::updateSummonModeHint() {
-    if (!m_summonModeHint || !m_summonModeHold) {
-        return;
-    }
-    m_summonModeHint->setText(m_summonModeHold->isChecked()
-                                  ? QStringLiteral("按住呼出，松开返回")
-                                  : QStringLiteral("长按 300ms 呼出"));
-}
-
-void SettingsPage::startSummonListen() {
+void SettingsPage::startListen(ListenTarget target) {
     if (m_listening || !m_session) {
         return;
     }
     m_listening = true;
+    m_listenTarget = target;
     m_captureWasEnabled = m_session->inputCaptureEnabled();
     m_session->setInputCaptureEnabled(false);
     m_summonStatus->clear();
-    refreshSummonButton();
+    refreshListenButtons();
     qApp->installEventFilter(this);
-    m_summonTimer->start();
+    m_listenTimer->start();
 }
 
-void SettingsPage::stopSummonListen() {
+void SettingsPage::stopListen() {
     if (!m_listening) {
         return;
     }
     m_listening = false;
     qApp->removeEventFilter(this);
-    m_summonTimer->stop();
-    refreshSummonButton();
+    m_listenTimer->stop();
+    refreshListenButtons();
     if (m_session) {
         m_session->setInputCaptureEnabled(m_captureWasEnabled);
     }
 }
 
-void SettingsPage::handleSummonCandidate(int vk) {
+void SettingsPage::handleListenCandidate(int vk) {
     if (isForbiddenSummonKey(vk)) {
         if (vk == 0x01) {
-            m_summonStatus->setText(QStringLiteral("鼠标左键用于开火映射，不能作为呼出键"));
+            m_summonStatus->setText(QStringLiteral("鼠标左键用于开火映射，不能作为改绑按键"));
         } else {
             m_summonStatus->setText(
-                QStringLiteral("该键已被占用：Esc / F9 / F10 / F11 / Win 不可作为呼出键"));
+                QStringLiteral("该键已被占用：Esc / F9 / F10 / F11 / Win 不可改绑"));
         }
         return;
     }
-    m_summonKey = vk;
-    QSettings().setValue(QStringLiteral("input/summonKey"), vk);
-    stopSummonListen();
+    // 呼出键与疾跑键互斥（同一键会先被拦截，无法同时承担两个职责）。
+    const bool conflict = m_listenTarget == ListenTarget::Sprint
+                              ? vkMatchesSummon(vk, m_summonKey)
+                              : vkMatchesSummon(vk, m_sprintKey);
+    if (conflict) {
+        m_summonStatus->setText(
+            m_listenTarget == ListenTarget::Sprint
+                ? QStringLiteral("该键已被呼出鼠标占用，请先更换呼出键或另选按键")
+                : QStringLiteral("该键已被疾跑键占用，请先更换疾跑键或另选按键"));
+        return;
+    }
+    if (m_listenTarget == ListenTarget::Sprint) {
+        m_sprintKey = vk;
+        QSettings().setValue(QStringLiteral("input/sprintKey"), vk);
+        emit sprintKeyChanged(vk);
+    } else {
+        m_summonKey = vk;
+        QSettings().setValue(QStringLiteral("input/summonKey"), vk);
+        emit summonKeyChanged(vk);
+    }
+    stopListen();
     m_summonStatus->clear();
-    emit summonKeyChanged(vk);
 }
 
 bool SettingsPage::eventFilter(QObject *watched, QEvent *event) {
@@ -330,14 +404,14 @@ bool SettingsPage::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::KeyPress) {
         auto *keyEvent = static_cast<QKeyEvent *>(event);
         if (keyEvent->key() == Qt::Key_Escape) {
-            stopSummonListen();
+            stopListen();
             m_summonStatus->setText(QStringLiteral("已取消改绑"));
             return true;
         }
         if (keyEvent->isAutoRepeat()) {
             return true;
         }
-        handleSummonCandidate(vkFromKeyEvent(*keyEvent));
+        handleListenCandidate(vkFromKeyEvent(*keyEvent));
         return true;
     }
     if (event->type() == QEvent::MouseButtonPress) {
@@ -349,9 +423,13 @@ bool SettingsPage::eventFilter(QObject *watched, QEvent *event) {
             vk = 0x02;
         } else if (mouseEvent->button() == Qt::MiddleButton) {
             vk = 0x04;
+        } else if (mouseEvent->button() == Qt::BackButton) {
+            vk = 0x06;
+        } else if (mouseEvent->button() == Qt::ForwardButton) {
+            vk = 0x07;
         }
         if (vk) {
-            handleSummonCandidate(vk);
+            handleListenCandidate(vk);
         }
         return true;
     }
@@ -410,18 +488,23 @@ void SettingsPage::syncFromProfile() {
                                          : profile.maxSize >= 720 ? 2
                                          : profile.maxSize >= 480 ? 3
                                                                   : 0);
-    m_fpsCombo->setCurrentIndex(profile.maxFps >= 120 ? 2 : profile.maxFps >= 60 ? 1 : 0);
+    m_fpsCombo->setCurrentIndex(profile.maxFps >= 120 ? 3
+                              : profile.maxFps >= 90 ? 2
+                              : profile.maxFps >= 60 ? 1
+                                                     : 0);
     const int mbps = std::max(1, profile.videoBitRate / 1'000'000);
     m_bitrateCombo->setCurrentIndex(mbps <= 4 ? 0 : mbps <= 8 ? 1 : mbps <= 12 ? 2
                                                                   : mbps <= 16 ? 3
                                                                                : 4);
     m_audioCheck->setChecked(profile.audioEnabled);
     m_screenOffCheck->setChecked(profile.screenOff);
+    m_statsOverlayCheck->setChecked(
+        QSettings().value(QStringLiteral("display/statsOverlay"), true).toBool());
 
     const bool pro = LicenseManager::instance().isPro();
     if (m_humanizerStatus) {
-        m_humanizerStatus->setText(pro ? QStringLiteral("Pro 自动开启（触控抖动与随机时序）")
-                                       : QStringLiteral("基础版固定时序，Pro 自动开启"));
+        m_humanizerStatus->setText(pro ? QStringLiteral("付费版自动开启（触控抖动与随机时序）")
+                                       : QStringLiteral("基础版固定时序，付费版自动开启"));
     }
     m_licenseLabel->setText(pro ? QStringLiteral("PRO · 永久有效")
                                 : QStringLiteral("基础版 · 功能不受限时可正常游玩"));
@@ -438,10 +521,10 @@ void SettingsPage::storeProfile() {
     }
     Profile profile = m_session->profile();
     static const int resolutions[] = {0, 1080, 720, 480};
-    static const int fpsValues[] = {30, 60, 120};
+    static const int fpsValues[] = {30, 60, 90, 120};
     static const int bitrates[] = {4, 8, 12, 16, 20};
     profile.maxSize = resolutions[std::clamp(m_resolutionCombo->currentIndex(), 0, 3)];
-    profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 2)];
+    profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 3)];
     profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 4)] * 1'000'000;
     profile.audioEnabled = m_audioCheck->isChecked();
     m_session->applyProfile(profile, true);

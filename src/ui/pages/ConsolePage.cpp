@@ -85,6 +85,7 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
                            .toString() == QStringLiteral("hold")
                        ? SummonMode::Hold
                        : SummonMode::LongPress;
+    m_statsOverlayEnabled = settings.value(QStringLiteral("display/statsOverlay"), true).toBool();
 
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -145,7 +146,9 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
 
                     if (streaming) {
                         if (m_active && m_mode != InputMode::Edit) {
-                            setInputMode(InputMode::Mapping);
+                            // 默认模式：全屏=游戏映射，窗口=鼠标指针（S5）。
+                            setInputMode(m_gameMode ? InputMode::Mapping
+                                                    : InputMode::Pointer);
                         }
                         if (!m_summonHintShown) {
                             showSummonHint();
@@ -174,6 +177,7 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
                         m_summonHeld = false;
                         m_summonHoldTimer->stop();
                     }
+                    updateStatsOverlay();
                 });
         connect(m_session, &Session::profileChanged, this,
                 [this](const Profile &) { refreshProfileToUi(); });
@@ -222,7 +226,7 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
                                    QStringLiteral("720p"), QStringLiteral("480p")},
                                   0);
     m_fpsCombo = makeCombo({QStringLiteral("30 fps"), QStringLiteral("60 fps"),
-                            QStringLiteral("120 fps · PRO")},
+                            QStringLiteral("90 fps · PRO"), QStringLiteral("120 fps · PRO")},
                            1);
     m_bitrateCombo = makeCombo({QStringLiteral("4 Mbps"), QStringLiteral("8 Mbps"),
                                 QStringLiteral("12 Mbps"), QStringLiteral("16 Mbps"),
@@ -258,12 +262,34 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
         emit toggleGameMode();
     });
 
+    // 鼠标模式切换：入工具栏，不再悬浮画布（避免挡住键位）。
+    m_mouseButton = new QToolButton(m_toolbar);
+    m_mouseButton->setObjectName(QStringLiteral("MouseModeButton"));
+    m_mouseButton->setIcon(IconFactory::icon(QStringLiteral("mouse"), Theme::textSecondary(), 16));
+    m_mouseButton->setIconSize(QSize(16, 16));
+    m_mouseButton->setFixedSize(28, 28);
+    m_mouseButton->setCheckable(true);
+    m_mouseButton->setToolTip(QStringLiteral("鼠标指针模式"));
+    m_mouseButton->setCursor(Qt::PointingHandCursor);
+    layout->addWidget(m_mouseButton);
+    connect(m_mouseButton, &QToolButton::clicked, this, [this](bool checked) {
+        if (checked) {
+            enterPointerMode();
+            if (m_mode != InputMode::Pointer) {
+                QSignalBlocker blocker(m_mouseButton);
+                m_mouseButton->setChecked(false);
+            }
+        } else if (m_mode == InputMode::Pointer) {
+            setInputMode(InputMode::Mapping);
+        }
+    });
+
     connect(m_resolutionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int) { applyVideoOptions(); });
     connect(m_fpsCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int index) {
-                if (index == 2 && !LicenseManager::instance().isPro()) {
-                    showHud(QStringLiteral("120fps 为 Pro 功能，激活后解锁"));
+                if (index >= 2 && !LicenseManager::instance().isPro()) {
+                    showHud(QStringLiteral("90/120fps 为付费功能，激活后解锁"));
                     QSignalBlocker blocker(m_fpsCombo);
                     m_fpsCombo->setCurrentIndex(1);
                     return;
@@ -292,24 +318,12 @@ void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
         m_keymapSelected = index;
         if (index >= 0) {
             m_regionTarget = 0;
-            if (m_regionGroup) {
-                QSignalBlocker blocker(m_regionGroup);
-                if (auto *checked = m_regionGroup->checkedButton()) {
-                    checked->setChecked(false);
-                }
-            }
         }
         refreshKeymapProperties();
     });
     connect(m_overlay, &KeymapOverlay::regionSelected, this, [this](int region) {
         m_keymapSelected = -1;
         m_regionTarget = region;
-        if (m_regionGroup) {
-            QSignalBlocker blocker(m_joystickTargetButton);
-            QSignalBlocker blocker2(m_lookTargetButton);
-            m_joystickTargetButton->setChecked(region == 1);
-            m_lookTargetButton->setChecked(region == 2);
-        }
         refreshKeymapProperties();
     });
     connect(m_overlay, &KeymapOverlay::regionMoved, this, [this](int) {
@@ -362,7 +376,14 @@ void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
     m_summonHint->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_summonHint->hide();
 
-    buildFloatingButtons();
+    // 全屏信息悬浮（码率 / 帧率 / 延迟，顶部居中，设置统一开关）
+    m_statsOverlay = new QLabel(m_video);
+    m_statsOverlay->setStyleSheet(QStringLiteral(
+        "background: rgba(8,10,13,0.62); color: #E8EDF2; padding: 4px 12px; border-radius: 4px;"));
+    m_statsOverlay->setFont(Theme::monoFont(13));
+    m_statsOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_statsOverlay->setText(QStringLiteral("-- FPS · -- Mbps · -- ms"));
+    m_statsOverlay->hide();
 
     connect(m_video, &VideoWidget::doubleClicked, this, [this] {
         // 全屏下只允许 Esc / F11 退出；编辑与画布直操态双击属于手机/编辑操作。
@@ -373,50 +394,6 @@ void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
     });
     connect(m_video, &VideoWidget::videoRectChanged, this,
             [this](const QRect &) { layoutVideoOverlays(); });
-}
-
-void ConsolePage::buildFloatingButtons() {
-    m_floatingButtons = new QWidget(m_video);
-    auto *layout = new QHBoxLayout(m_floatingButtons);
-    layout->setContentsMargins(4, 4, 4, 4);
-    layout->setSpacing(4);
-
-    m_mouseButton = new QToolButton(m_floatingButtons);
-    m_mouseButton->setObjectName(QStringLiteral("MouseModeButton"));
-    m_mouseButton->setIcon(IconFactory::icon(QStringLiteral("mouse"), Theme::textSecondary(), 16));
-    m_mouseButton->setIconSize(QSize(16, 16));
-    m_mouseButton->setFixedSize(28, 28);
-    m_mouseButton->setCheckable(true);
-    m_mouseButton->setToolTip(QStringLiteral("鼠标指针模式"));
-    m_mouseButton->setCursor(Qt::PointingHandCursor);
-
-    m_fullscreenButton = new QToolButton(m_floatingButtons);
-    m_fullscreenButton->setIcon(
-        IconFactory::icon(QStringLiteral("maximize"), Theme::textSecondary(), 16));
-    m_fullscreenButton->setIconSize(QSize(16, 16));
-    m_fullscreenButton->setFixedSize(28, 28);
-    m_fullscreenButton->setToolTip(QStringLiteral("全屏游戏模式（F11）"));
-    m_fullscreenButton->setCursor(Qt::PointingHandCursor);
-
-    layout->addWidget(m_mouseButton);
-    layout->addWidget(m_fullscreenButton);
-    m_floatingButtons->setObjectName(QStringLiteral("FloatingButtons"));
-    m_floatingButtons->setAttribute(Qt::WA_StyledBackground, true);
-    m_floatingButtons->hide();
-    m_floatingButtons->adjustSize();
-
-    connect(m_fullscreenButton, &QToolButton::clicked, this, [this] { emit toggleGameMode(); });
-    connect(m_mouseButton, &QToolButton::clicked, this, [this](bool checked) {
-        if (checked) {
-            enterPointerMode();
-            if (m_mode != InputMode::Pointer) {
-                QSignalBlocker blocker(m_mouseButton);
-                m_mouseButton->setChecked(false);
-            }
-        } else if (m_mode == InputMode::Pointer) {
-            setInputMode(InputMode::Mapping);
-        }
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -688,23 +665,6 @@ QWidget *ConsolePage::buildKeymapTab() {
     sensitivityRow->addWidget(m_sensitivitySpin);
     edit->addLayout(sensitivityRow);
 
-    // 轮盘 / 视角触发区：与键位选择互斥
-    auto *regionRow = new QHBoxLayout();
-    regionRow->addWidget(new QLabel(QStringLiteral("区域"), m_editBox));
-    m_joystickTargetButton = makeToolButton(m_editBox, QStringLiteral("轮盘"));
-    m_lookTargetButton = makeToolButton(m_editBox, QStringLiteral("视角触发区"));
-    m_regionGroup = new QButtonGroup(this);
-    m_regionGroup->setExclusive(true);
-    for (QPushButton *button : {m_joystickTargetButton, m_lookTargetButton}) {
-        button->setCheckable(true);
-        button->setProperty("role", "option");
-        button->setFixedHeight(28);
-        button->setCursor(Qt::PointingHandCursor);
-        m_regionGroup->addButton(button);
-        regionRow->addWidget(button, 1);
-    }
-    edit->addLayout(regionRow);
-
     auto *selectedTitle = new QLabel(QStringLiteral("选中键位"), m_editBox);
     selectedTitle->setObjectName(QStringLiteral("SectionTitle"));
     edit->addWidget(selectedTitle);
@@ -727,19 +687,23 @@ QWidget *ConsolePage::buildKeymapTab() {
     edit->addLayout(positionRow);
 
     auto *sizeRow = new QHBoxLayout();
-    sizeRow->addWidget(new QLabel(QStringLiteral("大小"), m_editBox));
+    m_sizeLabel = new QLabel(QStringLiteral("大小"), m_editBox);
+    sizeRow->addWidget(m_sizeLabel);
     m_sizeSlider = new QSlider(Qt::Horizontal, m_editBox);
     m_sizeSlider->setRange(20, 160);
     sizeRow->addWidget(m_sizeSlider, 1);
     edit->addLayout(sizeRow);
 
-    auto *actionRow = new QHBoxLayout();
-    actionRow->addWidget(new QLabel(QStringLiteral("模式"), m_editBox));
-    m_actionCombo = new QComboBox(m_editBox);
-    m_actionCombo->addItems({QStringLiteral("点按"), QStringLiteral("按住"), QStringLiteral("滑动"),
-                             QStringLiteral("双击")});
-    actionRow->addWidget(m_actionCombo, 1);
-    edit->addLayout(actionRow);
+    // 疾跑大圆：仅轮盘区域选中时显示（小圆 ≤ 大圆）
+    m_sprintSizeRow = new QWidget(m_editBox);
+    auto *sprintSizeLayout = new QHBoxLayout(m_sprintSizeRow);
+    sprintSizeLayout->setContentsMargins(0, 0, 0, 0);
+    sprintSizeLayout->addWidget(new QLabel(QStringLiteral("大圆"), m_sprintSizeRow));
+    m_sprintSizeSlider = new QSlider(Qt::Horizontal, m_sprintSizeRow);
+    m_sprintSizeSlider->setRange(20, 300);
+    sprintSizeLayout->addWidget(m_sprintSizeSlider, 1);
+    edit->addWidget(m_sprintSizeRow);
+    m_sprintSizeRow->setVisible(false);
 
     m_deleteBindingButton = makeToolButton(m_editBox, QStringLiteral("删除此键位"), "danger");
     edit->addWidget(m_deleteBindingButton);
@@ -752,7 +716,10 @@ QWidget *ConsolePage::buildKeymapTab() {
     edit->addWidget(overlapHint);
 
     auto *editHint = new QLabel(
-        QStringLiteral("拖拽放置 · 滚轮缩放 · Delete 删除 · Ctrl+S 保存"), m_editBox);
+        QStringLiteral("直通：按下=手指按下 · 抬起=手指抬起 · 多键同按=多指\n"
+                       "拖拽放置 · 滚轮缩放 · Ctrl+滚轮调疾跑大圆 · Delete 删除 · Ctrl+S 保存\n"
+                       "滚轮上下也可绑定：选中按键框后滚动滚轮"),
+        m_editBox);
     editHint->setProperty("variant", "micro");
     editHint->setWordWrap(true);
     edit->addWidget(editHint);
@@ -792,7 +759,7 @@ QWidget *ConsolePage::buildKeymapTab() {
     connect(m_ySpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
             [this](int) { applyBindingFromUi(); });
     connect(m_sizeSlider, &QSlider::valueChanged, this, [this](int) { applyBindingFromUi(); });
-    connect(m_actionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+    connect(m_sprintSizeSlider, &QSlider::valueChanged, this,
             [this](int) { applyBindingFromUi(); });
     connect(m_sensitivitySlider, &QSlider::valueChanged, this, [this](int value) {
         if (m_sensitivitySpin &&
@@ -813,16 +780,6 @@ QWidget *ConsolePage::buildKeymapTab() {
                 m_keymapProfile.lookSensitivity = value;
                 markKeymapDirty();
             });
-    connect(m_joystickTargetButton, &QPushButton::toggled, this, [this](bool checked) {
-        if (checked) {
-            setRegionTarget(1);
-        }
-    });
-    connect(m_lookTargetButton, &QPushButton::toggled, this, [this](bool checked) {
-        if (checked) {
-            setRegionTarget(2);
-        }
-    });
 
     return panel;
 }
@@ -872,9 +829,10 @@ void ConsolePage::layoutVideoOverlays() {
         m_summonHint->move(anchor.right() - m_summonHint->width() - 12,
                            anchor.bottom() - m_summonHint->height() - 12);
     }
-    if (m_floatingButtons) {
-        m_floatingButtons->move(anchor.right() - m_floatingButtons->width() - 8,
-                                anchor.top() + 8);
+    if (m_statsOverlay) {
+        m_statsOverlay->adjustSize();
+        m_statsOverlay->move(anchor.left() + (anchor.width() - m_statsOverlay->width()) / 2,
+                             anchor.top() + 12);
     }
 }
 
@@ -895,7 +853,10 @@ void ConsolePage::refreshProfileToUi() {
                                    : profile.maxSize >= 720 ? 2
                                    : profile.maxSize >= 480 ? 3
                                                             : 0);
-    m_fpsCombo->setCurrentIndex(profile.maxFps >= 120 ? 2 : profile.maxFps >= 60 ? 1 : 0);
+    m_fpsCombo->setCurrentIndex(profile.maxFps >= 120 ? 3
+                              : profile.maxFps >= 90 ? 2
+                              : profile.maxFps >= 60 ? 1
+                                                     : 0);
     const int mbps = std::max(1, profile.videoBitRate / 1'000'000);
     const int bitrateIndex = mbps <= 4 ? 0 : mbps <= 8 ? 1 : mbps <= 12 ? 2 : mbps <= 16 ? 3 : 4;
     m_bitrateCombo->setCurrentIndex(bitrateIndex);
@@ -993,8 +954,8 @@ void ConsolePage::applyVideoOptions() {
     static const int resolutions[] = {0, 1080, 720, 480};
     profile.maxSize = resolutions[std::clamp(m_resolutionCombo->currentIndex(), 0, 3)];
 
-    static const int fpsValues[] = {30, 60, 120};
-    profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 2)];
+    static const int fpsValues[] = {30, 60, 90, 120};
+    profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 3)];
 
     static const int bitrates[] = {4, 8, 12, 16, 20};
     profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 4)] * 1'000'000;
@@ -1012,6 +973,18 @@ void ConsolePage::updateStatsUi() {
 
     m_fpsLabel->setText(stats.fps > 0.5 ? QString::number(std::lround(stats.fps))
                                         : QStringLiteral("--"));
+    if (m_statsOverlay) {
+        const QString fps = stats.fps > 0.5 ? QString::number(std::lround(stats.fps))
+                                            : QStringLiteral("--");
+        const QString mbps = QString::number(stats.bitrateMbps, 'f', 1);
+        const QString latency = stats.inputLatencyMs >= 0
+                                    ? QString::number(stats.inputLatencyMs, 'f', 1)
+                                    : QStringLiteral("--");
+        m_statsOverlay->setText(
+            QStringLiteral("%1 FPS · %2 Mbps · %3 ms").arg(fps, mbps, latency));
+        m_statsOverlay->adjustSize();
+        layoutVideoOverlays();
+    }
     const double latency = stats.inputLatencyMs;
     if (latency >= 0) {
         m_latencyLabel->setText(QStringLiteral("%1 ms").arg(latency, 0, 'f', 1));
@@ -1080,8 +1053,9 @@ void ConsolePage::setActive(bool active) {
         // 激活状态可能在设置页发生变化，进入投屏页时重新应用门槛与增强参数。
         refreshProfileToUi();
         refreshQualityAvailability();
+        // 默认模式：全屏=游戏映射，窗口=鼠标指针（S5）。
         setInputMode(m_session && m_session->state() == Session::State::Streaming
-                         ? InputMode::Mapping
+                         ? (m_gameMode ? InputMode::Mapping : InputMode::Pointer)
                          : InputMode::Idle);
         if (!m_summonHintShown) {
             showSummonHint();
@@ -1102,9 +1076,7 @@ bool ConsolePage::requestDeactivate() {
     setInputMode(InputMode::Idle);
     m_hud->hide();
     m_summonHint->hide();
-    if (m_floatingButtons) {
-        m_floatingButtons->hide();
-    }
+    updateStatsOverlay();
     return true;
 }
 
@@ -1161,10 +1133,6 @@ void ConsolePage::setInputMode(InputMode mode) {
             QSignalBlocker blocker(m_mouseButton);
             m_mouseButton->setChecked(true);
         }
-        if (m_floatingButtons) {
-            m_floatingButtons->show();
-            m_floatingButtons->raise();
-        }
         break;
     case InputMode::Mapping:
         if (previous == InputMode::Pointer) {
@@ -1180,9 +1148,6 @@ void ConsolePage::setInputMode(InputMode mode) {
         m_overlay->show();
         m_overlay->raise();
         m_overlay->setFocus();
-        if (m_floatingButtons) {
-            m_floatingButtons->hide();
-        }
         break;
     case InputMode::Idle:
         if (m_mouseButton) {
@@ -1190,9 +1155,6 @@ void ConsolePage::setInputMode(InputMode mode) {
             m_mouseButton->setChecked(false);
         }
         m_hud->hide();
-        if (m_floatingButtons) {
-            m_floatingButtons->hide();
-        }
         break;
     }
 
@@ -1217,10 +1179,15 @@ void ConsolePage::updateInputCapture() {
         return;
     }
     const bool streaming = m_session->state() == Session::State::Streaming;
-    const bool capture = m_active && streaming && m_mode == InputMode::Mapping;
+    // 指针模式也保持键盘/其它鼠标键映射：呼出鼠标只接管光标与视角。
+    const bool interactive = m_mode == InputMode::Mapping || m_mode == InputMode::Pointer;
+    const bool capture = m_active && streaming && interactive;
     m_session->setInputCaptureEnabled(capture);
-    // 窗口态映射下左键由画布直操注入，Raw Input 只保留键盘/右键映射。
-    m_session->setDirectTouchEnabled(capture && !m_gameMode);
+    // 左键由画布直操注入（指针模式 / 窗口态映射），Raw Input 不再映射左键。
+    m_session->setDirectTouchEnabled(capture &&
+                                     (m_mode == InputMode::Pointer || !m_gameMode));
+    // 指针模式鼠标用于移动系统光标：位移不再驱动视角。
+    m_session->setLookEnabled(m_mode != InputMode::Pointer);
 }
 
 void ConsolePage::updateCursor() {
@@ -1625,11 +1592,22 @@ void ConsolePage::refreshKeymapSummary() {
         return;
     }
     m_keymapSummary->setText(
-        QStringLiteral("方案：%1\n轮盘半径 %2 · 视角半径 %3\n视角灵敏度 %4×")
+        QStringLiteral("方案：%1\n轮盘 %2（疾跑 %3） · 视角半径 %4\n视角灵敏度 %5×")
             .arg(m_keymapProfile.name)
             .arg(m_keymapProfile.joystickRadius, 0, 'f', 3)
+            .arg(m_keymapProfile.joystickSprintRadius, 0, 'f', 3)
             .arg(m_keymapProfile.lookRadius, 0, 'f', 3)
             .arg(m_keymapProfile.lookSensitivity, 0, 'f', 2));
+}
+
+bool ConsolePage::wheelBound(int delta) const {
+    const int vk = delta > 0 ? ks::kVkWheelUp : ks::kVkWheelDown;
+    for (const KeyBinding &binding : m_keymapProfile.bindings) {
+        if (binding.vk == vk) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int ConsolePage::selectedBinding() const {
@@ -1643,6 +1621,10 @@ void ConsolePage::refreshKeymapProperties() {
     if (!m_keyCaptureButton) {
         return;
     }
+    // 回填 UI 期间屏蔽 applyBindingFromUi：滑杆 setRange 触发的钳制 valueChanged
+    // 不得把面板旧值（区域坐标/最大半径）写进当前键位（S3 根因）。
+    m_syncingBindingUi = true;
+
     // 灵敏度始终反映当前方案
     if (m_sensitivitySlider && m_sensitivitySpin) {
         const int sliderValue =
@@ -1662,30 +1644,46 @@ void ConsolePage::refreshKeymapProperties() {
     m_ySpin->setEnabled(valid || regionMode);
     m_sizeSlider->setEnabled(valid || regionMode);
     m_keyCaptureButton->setEnabled(valid);
-    m_actionCombo->setEnabled(valid);
     m_deleteBindingButton->setEnabled(valid);
 
     if (regionMode) {
         const bool joystick = m_regionTarget == 1;
-        const QPointF center = joystick ? m_keymapProfile.joystickCenter
-                                        : m_keymapProfile.lookCenter;
-        const double radius = joystick ? m_keymapProfile.joystickRadius
-                                       : m_keymapProfile.lookRadius;
         m_keyCaptureButton->setText(joystick ? QStringLiteral("轮盘")
                                              : QStringLiteral("视角触发区"));
         QSignalBlocker blockX(m_xSpin);
         QSignalBlocker blockY(m_ySpin);
         QSignalBlocker blockSize(m_sizeSlider);
+        QSignalBlocker blockSprint(m_sprintSizeSlider);
+        if (joystick) {
+            m_sizeLabel->setText(QStringLiteral("小圆"));
+            m_sprintSizeRow->setVisible(true);
+            m_sizeSlider->setRange(20, 300);
+            m_sizeSlider->setValue(static_cast<int>(m_keymapProfile.joystickRadius * 1000));
+            m_sprintSizeSlider->setValue(
+                static_cast<int>(m_keymapProfile.joystickSprintRadius * 1000));
+        } else {
+            m_sizeLabel->setText(QStringLiteral("大小"));
+            m_sprintSizeRow->setVisible(false);
+            m_sizeSlider->setRange(50, 450);
+            m_sizeSlider->setValue(static_cast<int>(m_keymapProfile.lookRadius * 1000));
+        }
+        const QPointF center = joystick ? m_keymapProfile.joystickCenter
+                                        : m_keymapProfile.lookCenter;
         m_xSpin->setValue(static_cast<int>(center.x() * 1000));
         m_ySpin->setValue(static_cast<int>(center.y() * 1000));
-        m_sizeSlider->setRange(joystick ? 20 : 50, joystick ? 300 : 450);
-        m_sizeSlider->setValue(static_cast<int>(radius * 1000));
+        m_syncingBindingUi = false;
         return;
     }
 
-    m_sizeSlider->setRange(20, 160);
+    m_sizeLabel->setText(QStringLiteral("大小"));
+    m_sprintSizeRow->setVisible(false);
+    {
+        QSignalBlocker blockSizeRange(m_sizeSlider);
+        m_sizeSlider->setRange(20, 160);
+    }
     if (!valid) {
         m_keyCaptureButton->setText(QStringLiteral("--"));
+        m_syncingBindingUi = false;
         return;
     }
     const KeyBinding &binding = m_keymapProfile.bindings.at(index);
@@ -1694,31 +1692,19 @@ void ConsolePage::refreshKeymapProperties() {
     QSignalBlocker blockX(m_xSpin);
     QSignalBlocker blockY(m_ySpin);
     QSignalBlocker blockSize(m_sizeSlider);
-    QSignalBlocker blockAction(m_actionCombo);
     m_xSpin->setValue(static_cast<int>(binding.center.x() * 1000));
     m_ySpin->setValue(static_cast<int>(binding.center.y() * 1000));
     m_sizeSlider->setValue(static_cast<int>(binding.radius * 1000));
-    m_actionCombo->setCurrentIndex(static_cast<int>(binding.action));
+    m_syncingBindingUi = false;
 }
 
 void ConsolePage::setRegionTarget(int region) {
-    if (!m_regionGroup) {
-        return;
-    }
     m_regionTarget = region;
     if (region == 0) {
-        QSignalBlocker blockJoy(m_joystickTargetButton);
-        QSignalBlocker blockLook(m_lookTargetButton);
-        m_joystickTargetButton->setChecked(false);
-        m_lookTargetButton->setChecked(false);
         m_overlay->setSelectedRegion(KeymapOverlay::Region::None);
     } else {
         m_keymapSelected = -1;
         m_overlay->setSelected(-1);
-        QSignalBlocker blockJoy(m_joystickTargetButton);
-        QSignalBlocker blockLook(m_lookTargetButton);
-        m_joystickTargetButton->setChecked(region == 1);
-        m_lookTargetButton->setChecked(region == 2);
         m_overlay->setSelectedRegion(
             region == 1 ? KeymapOverlay::Region::Joystick : KeymapOverlay::Region::Look);
     }
@@ -1741,10 +1727,8 @@ void ConsolePage::saveKeymap() {
 void ConsolePage::addKeymapBinding() {
     KeyBinding binding;
     binding.vk = 0x47; // G
-    binding.action = BindingAction::Tap;
     binding.center = QPointF(0.5, 0.5);
     binding.radius = 0.045;
-    binding.slideTo = binding.center;
     m_keymapProfile.bindings.append(binding);
     m_keymapSelected = m_keymapProfile.bindings.size() - 1;
     setRegionTarget(0);
@@ -1787,15 +1771,23 @@ void ConsolePage::stopKeyCapture() {
 }
 
 void ConsolePage::applyBindingFromUi() {
+    // 面板回填期间不回写（refreshKeymapProperties 的钳制信号会误写，见 S3）。
+    if (m_syncingBindingUi) {
+        return;
+    }
     if (m_regionTarget != 0) {
         const QPointF center(m_xSpin->value() / 1000.0, m_ySpin->value() / 1000.0);
-        const double radius = m_sizeSlider->value() / 1000.0;
         if (m_regionTarget == 1) {
-            m_keymapProfile.joystickCenter = center;
-            m_keymapProfile.joystickRadius = std::clamp(radius, 0.02, 0.30);
+            // 小圆 ≤ 大圆：任一侧调整时交叉钳制。
+            const double inner = std::clamp(m_sizeSlider->value() / 1000.0, 0.02, 0.30);
+            const double outer =
+                std::clamp(m_sprintSizeSlider->value() / 1000.0, inner, 0.30);
+            m_keymapProfile.joystickRadius = inner;
+            m_keymapProfile.joystickSprintRadius = outer;
         } else {
             m_keymapProfile.lookCenter = center;
-            m_keymapProfile.lookRadius = std::clamp(radius, 0.05, 0.45);
+            m_keymapProfile.lookRadius =
+                std::clamp(m_sizeSlider->value() / 1000.0, 0.05, 0.45);
         }
         m_overlay->setProfile(m_keymapProfile);
         m_overlay->setSelectedRegion(
@@ -1810,9 +1802,6 @@ void ConsolePage::applyBindingFromUi() {
     KeyBinding &binding = m_keymapProfile.bindings[index];
     binding.center = QPointF(m_xSpin->value() / 1000.0, m_ySpin->value() / 1000.0);
     binding.radius = m_sizeSlider->value() / 1000.0;
-    static const BindingAction actions[] = {BindingAction::Tap, BindingAction::Hold,
-                                            BindingAction::Slide, BindingAction::Double};
-    binding.action = actions[std::clamp(m_actionCombo->currentIndex(), 0, 3)];
     m_overlay->setProfile(m_keymapProfile);
     markKeymapDirty();
 }
@@ -1890,6 +1879,21 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
             }
             return true;
         }
+        if (event->type() == QEvent::Wheel) {
+            // 滚轮上下也可绑定为键位：向上=滚轮上、向下=滚轮下
+            auto *wheelEvent = static_cast<QWheelEvent *>(event);
+            const int angle = wheelEvent->angleDelta().y();
+            if (angle != 0 && selectedBinding() >= 0) {
+                m_keymapProfile.bindings[m_keymapSelected].vk =
+                    angle > 0 ? ks::kVkWheelUp : ks::kVkWheelDown;
+                m_capturingKey = false;
+                qApp->removeEventFilter(this);
+                m_overlay->setProfile(m_keymapProfile);
+                refreshKeymapProperties();
+                markKeymapDirty();
+            }
+            return true;
+        }
         if (event->type() == QEvent::MouseButtonPress) {
             auto *mouseEvent = static_cast<QMouseEvent *>(event);
             int vk = 0;
@@ -1899,6 +1903,10 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
                 vk = 0x02;
             } else if (mouseEvent->button() == Qt::MiddleButton) {
                 vk = 0x04;
+            } else if (mouseEvent->button() == Qt::BackButton) {
+                vk = 0x06; // VK_XBUTTON1
+            } else if (mouseEvent->button() == Qt::ForwardButton) {
+                vk = 0x07; // VK_XBUTTON2
             }
             if (vk && selectedBinding() >= 0) {
                 m_keymapProfile.bindings[m_keymapSelected].vk = vk;
@@ -1923,16 +1931,6 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
     if (watched == m_video) {
         if (event->type() == QEvent::Resize) {
             layoutVideoOverlays();
-        } else if (event->type() == QEvent::Enter) {
-            if (!m_gameMode && m_mode != InputMode::Edit && m_floatingButtons) {
-                m_floatingButtons->show();
-                m_floatingButtons->raise();
-            }
-        } else if (event->type() == QEvent::Leave) {
-            if (m_mode != InputMode::Pointer && m_mode != InputMode::Edit && !m_gameMode &&
-                m_floatingButtons) {
-                m_floatingButtons->hide();
-            }
         } else if (event->type() == QEvent::KeyPress && m_mode == InputMode::Pointer) {
             auto *keyEvent = static_cast<QKeyEvent *>(event);
             if (keyEvent->key() == Qt::Key_Escape) {
@@ -1958,8 +1956,22 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
         } else if (event->type() == QEvent::Wheel) {
             auto *wheelEvent = static_cast<QWheelEvent *>(event);
             const QPoint pos = wheelEvent->position().toPoint();
-            const int delta = wheelEvent->angleDelta().y() > 0 ? 1 : -1;
-            if (delta == 0) {
+            const int angle = wheelEvent->angleDelta().y();
+            if (angle == 0) {
+                return true;
+            }
+            const int delta = angle > 0 ? 1 : -1;
+            const bool mappingMode =
+                m_mode == InputMode::Mapping || m_mode == InputMode::Pointer;
+            // 滚轮已绑定为上/下滚轮键位：作为游戏动作触发（逐格派发）。
+            if (mappingMode && wheelBound(delta)) {
+                const int steps = std::clamp(std::abs(angle) / 120, 1, 3);
+                for (int i = 0; i < steps; ++i) {
+                    InputEvent wheel;
+                    wheel.type = InputEventType::Wheel;
+                    wheel.dx = delta;
+                    m_session->postInputEvent(wheel);
+                }
                 return true;
             }
             if (canvasTouchActive()) {
@@ -1974,18 +1986,14 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
                 }
                 return true;
             }
-            if (m_mode == InputMode::Mapping) {
-                const QRect rect = m_video->videoRect();
-                if (m_gameMode || rect.contains(pos)) {
-                    InputEvent wheel;
-                    wheel.type = InputEventType::Wheel;
-                    wheel.dx = delta;
-                    m_session->postInputEvent(wheel);
-                }
-                return true;
-            }
+            // 未绑定且非直操（游戏态）：不注入滚动。手机端把滚动当作多指手势，
+            // 会与视角的单指拖动冲突，导致滚轮后视角不再响应。
             return true;
-        } else if (canvasTouchActive() && event->type() == QEvent::MouseButtonPress) {
+        } else if (canvasTouchActive() &&
+                   (event->type() == QEvent::MouseButtonPress ||
+                    event->type() == QEvent::MouseButtonDblClick)) {
+            // 双击间隔内的第二次按下 Qt 投递为 MouseButtonDblClick 而非 Press，
+            // 必须同样按「手指按下」处理，否则连点/双击丢触（S4）。
             auto *mouseEvent = static_cast<QMouseEvent *>(event);
             if (mouseEvent->button() == Qt::LeftButton) {
                 const QRect rect = m_video->videoRect();
@@ -2060,10 +2068,11 @@ void ConsolePage::setGameMode(bool enabled) {
     }
 
     if (enabled) {
-        if (m_floatingButtons) {
-            m_floatingButtons->hide();
-        }
         m_video->setFocus();
+        // 全屏默认游戏模式（S5）：指针态自动切回映射。
+        if (m_mode == InputMode::Pointer) {
+            setInputMode(InputMode::Mapping);
+        }
         if (m_mode == InputMode::Mapping) {
             const QString action = m_summonMode == SummonMode::Hold ? QStringLiteral("按住")
                                                                     : QStringLiteral("长按");
@@ -2071,14 +2080,41 @@ void ConsolePage::setGameMode(bool enabled) {
                         .arg(action, vkName(m_summonKey)));
         }
     } else {
-        if (m_mode == InputMode::Pointer) {
-            setInputMode(InputMode::Mapping);
+        // 窗口默认鼠标模式（S5）。
+        if (m_session && m_session->state() == Session::State::Streaming &&
+            m_mode != InputMode::Edit) {
+            setInputMode(InputMode::Pointer);
         }
         m_hud->hide();
     }
     updateCursor();
     updateInputCapture();
+    updateStatsOverlay();
     layoutVideoOverlays();
+}
+
+void ConsolePage::setStatsOverlayEnabled(bool enabled) {
+    m_statsOverlayEnabled = enabled;
+    updateStatsOverlay();
+}
+
+void ConsolePage::onSprintToggled(bool active) {
+    if (m_gameMode && m_mode == InputMode::Mapping) {
+        showHud(active ? QStringLiteral("疾跑已开启") : QStringLiteral("疾跑已关闭"));
+    }
+}
+
+void ConsolePage::updateStatsOverlay() {
+    if (!m_statsOverlay) {
+        return;
+    }
+    const bool show = m_gameMode && m_statsOverlayEnabled && m_session &&
+                      m_session->state() == Session::State::Streaming;
+    m_statsOverlay->setVisible(show);
+    if (show) {
+        m_statsOverlay->raise();
+        layoutVideoOverlays();
+    }
 }
 
 void ConsolePage::setBypassEnhance(bool bypass) { m_video->setBypassEnhance(bypass); }

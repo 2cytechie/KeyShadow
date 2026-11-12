@@ -1,6 +1,7 @@
 #include <QCoreApplication>
 #include <QStandardPaths>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <set>
@@ -207,37 +208,185 @@ void testLookEngine() {
 // ---------------------------------------------------------------------------
 void testKeymap() {
     ks::HumanizerEngine humanizer;
+    humanizer.setEnabled(false); // 直通测试使用确定坐标
     ks::KeymapEngine keymap;
     ks::KeyBinding binding;
     binding.vk = 0x20;
-    binding.action = ks::BindingAction::Tap;
     binding.center = QPointF(0.5, 0.5);
     binding.radius = 0.05;
-    keymap.configure({binding}, 1000, 1000);
+    ks::KeyBinding second;
+    second.vk = 0x41;
+    second.center = QPointF(0.6, 0.5);
+    second.radius = 0.05;
+    keymap.configure({binding, second}, 1000, 1000);
     keymap.setHumanizer(&humanizer);
 
     std::vector<QByteArray> messages;
     auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
 
+    // 直通：按下立即 DOWN
     check(keymap.handleKey(0x20, true, sink), "keymap handles bound key");
     check(!messages.empty() && static_cast<quint8>(messages.front().at(1)) == 0,
           "keymap sends DOWN on press");
+    check(!messages.empty() && read32(messages.front(), 10) == 500 &&
+              read32(messages.front(), 14) == 500,
+          "keymap DOWN at binding center");
+    const int firstPointer = static_cast<int>(read64(messages.front(), 2));
+
+    // 直通：按住期间不自动抬起（无 tick 合成时序）
+    messages.clear();
+    check(keymap.handleKey(0x20, true, sink), "repeat press consumed");
+    check(messages.empty(), "repeat press does not re-send DOWN");
+
+    // 多键同按 = 多指：第二个绑定分配不同 pointerId
+    messages.clear();
+    check(keymap.handleKey(0x41, true, sink), "second key handled");
+    check(messages.size() == 1 && static_cast<quint8>(messages.front().at(1)) == 0,
+          "second key sends DOWN");
+    const int secondPointer = static_cast<int>(read64(messages.front(), 2));
+    check(firstPointer != secondPointer, "multi-key uses distinct pointers");
+
+    // 抬起立即 UP
+    messages.clear();
+    check(keymap.handleKey(0x20, false, sink), "keymap handles release");
+    check(!messages.empty() && static_cast<quint8>(messages.back().at(1)) == 1,
+          "keymap sends UP on release");
+    messages.clear();
+    check(!keymap.handleKey(0x20, false, sink), "release without active action reports false");
+    check(messages.empty(), "release without active action sends nothing");
+}
+
+// ---------------------------------------------------------------------------
+void testJoystickSprint() {
+    ks::HumanizerEngine humanizer;
+    humanizer.setEnabled(false);
+    ks::JoystickEngine joystick;
+    joystick.setHumanizer(&humanizer);
+    joystick.configure(QPointF(0.5, 0.5), 0.10, 0.0, 1.0, 1000, 1000);
+    joystick.setSprintRadius(0.20);
+
+    std::vector<QByteArray> messages;
+    auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
+    auto maxOffsetX = [&messages]() {
+        int maxX = 0;
+        for (const QByteArray &message : messages) {
+            const quint8 action = static_cast<quint8>(message.at(1));
+            if (action == 0 || action == 2) { // DOWN / MOVE
+                maxX = std::max(maxX, static_cast<int>(read32(message, 10)) - 500);
+            }
+        }
+        return maxX;
+    };
+
+    // 普通态：满力推到小圆边缘（0.10 × 1000 = 100px）
+    joystick.setKeys(false, false, false, true); // D → +x
+    joystick.tick(16, sink);
+    check(maxOffsetX() >= 99 && maxOffsetX() <= 101, "normal push limited to inner circle");
+
+    // 疾跑态：同一力度可滑到大圆边缘（0.20 × 1000 = 200px）
+    joystick.setSprint(true);
+    messages.clear();
+    joystick.tick(16, sink);
+    check(maxOffsetX() >= 199 && maxOffsetX() <= 201, "sprint push reaches outer circle");
+
+    // 关闭疾跑：触点回落小圆
+    joystick.setSprint(false);
+    messages.clear();
+    joystick.tick(16, sink);
+    check(maxOffsetX() <= 101, "sprint off pulls touch back to inner circle");
+
+    joystick.release(sink);
+}
+
+// ---------------------------------------------------------------------------
+void testWheelBinding() {
+    ks::HumanizerEngine humanizer;
+    humanizer.setEnabled(false);
+    ks::KeymapEngine keymap;
+    ks::KeyBinding wheelUp;
+    wheelUp.vk = ks::kVkWheelUp;
+    wheelUp.center = QPointF(0.5, 0.5);
+    wheelUp.radius = 0.05;
+    keymap.configure({wheelUp}, 1000, 1000);
+    keymap.setHumanizer(&humanizer);
+
+    std::vector<QByteArray> messages;
+    auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
+
+    // 未绑定方向：滚轮不注入任何消息（不再发送居中滚动）
+    check(!keymap.handleWheel(-1, sink), "unbound wheel direction reports false");
+    check(messages.empty(), "unbound wheel injects nothing");
+
+    // 已绑定方向：按下 → 延时抬起（模拟一次点按）
+    check(keymap.handleWheel(1, sink), "bound wheel triggers");
+    check(messages.size() == 1 && static_cast<quint8>(messages.front().at(1)) == 0,
+          "bound wheel sends DOWN");
+    check(!messages.empty() && read32(messages.front(), 10) == 500 &&
+              read32(messages.front(), 14) == 500,
+          "bound wheel DOWN at binding center");
 
     messages.clear();
-    for (int i = 0; i < 30; ++i) {
+    for (int i = 0; i < 6; ++i) {
         keymap.tick(10, sink);
     }
     check(!messages.empty() && static_cast<quint8>(messages.back().at(1)) == 1,
-          "keymap sends UP after tap duration");
+          "bound wheel sends UP after hold");
+}
 
-    for (int i = 0; i < 32; ++i) {
-        const int duration = humanizer.tapDurationMs();
-        if (duration < 40 || duration > 120) {
-            check(false, "humanizer tap duration in range");
-            return;
-        }
-    }
-    check(true, "humanizer tap duration in range");
+// ---------------------------------------------------------------------------
+void testKeySuspension() {
+    ks::KeymapEngine keymap;
+    ks::KeyBinding binding;
+    binding.vk = 0x20;
+    binding.center = QPointF(0.5, 0.5);
+    binding.radius = 0.05;
+    keymap.configure({binding}, 1000, 1000);
+
+    std::vector<QByteArray> messages;
+    auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
+
+    keymap.handleKey(0x20, true, sink);
+    check(!messages.empty(), "press before releaseAll sends DOWN");
+
+    messages.clear();
+    keymap.releaseAll(sink); // 呼出鼠标：抬起全部触点
+    check(!messages.empty() && static_cast<quint8>(messages.back().at(1)) == 1,
+          "releaseAll lifts active key");
+
+    messages.clear();
+    check(keymap.handleKey(0x20, true, sink), "held key auto-repeat consumed");
+    check(messages.empty(), "auto-repeat does not re-press after releaseAll");
+
+    check(!keymap.handleKey(0x20, false, sink), "release of suspended key has no action");
+    messages.clear();
+    check(keymap.handleKey(0x20, true, sink), "re-press works after physical release");
+    check(!messages.empty() && static_cast<quint8>(messages.back().at(1)) == 0,
+          "re-press sends DOWN again");
+    keymap.releaseAll(sink);
+}
+
+// ---------------------------------------------------------------------------
+void testLookGating() {
+    ks::InputEngine engine;
+    engine.setScreenSize(1000, 1000);
+
+    std::vector<QByteArray> messages;
+    auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
+
+    ks::InputEvent move;
+    move.type = ks::InputEventType::MouseMove;
+    move.dx = 200;
+
+    // 指针模式：鼠标位移不驱动视角
+    engine.setLookEnabled(false);
+    engine.handleInput(move);
+    engine.tick(10, sink);
+    check(messages.empty(), "pointer mode suppresses look movement");
+
+    engine.setLookEnabled(true);
+    engine.handleInput(move);
+    engine.tick(10, sink);
+    check(!messages.empty(), "look resumes when enabled");
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +398,6 @@ void testSummonKeyFilter() {
     ks::Profile profile;
     ks::KeyBinding binding;
     binding.vk = VK_LMENU;
-    binding.action = ks::BindingAction::Tap;
     binding.center = QPointF(0.5, 0.5);
     binding.radius = 0.05;
     profile.bindings.append(binding);
@@ -285,7 +433,6 @@ void testDirectTouchFilter() {
     ks::Profile profile;
     ks::KeyBinding binding;
     binding.vk = 0x01; // VK_LBUTTON
-    binding.action = ks::BindingAction::Tap;
     binding.center = QPointF(0.5, 0.5);
     binding.radius = 0.05;
     profile.bindings.append(binding);
@@ -431,8 +578,21 @@ void testProfileStore() {
     check(loaded.bindings.size() == profile.bindings.size(), "profile bindings roundtrip");
     check(std::abs(loaded.bindings.first().center.x() - 0.25) < 0.001,
           "profile binding position roundtrip");
+    check(std::abs(loaded.joystickSprintRadius - profile.joystickSprintRadius) < 0.0001,
+          "sprint radius roundtrip");
+
+    // 小圆 > 大圆：读取时钳制 sprintRadius ≥ joystickRadius
+    ks::Profile clamped = ks::ProfileStore::makeDefaultProfile();
+    clamped.name = QStringLiteral("测试疾跑钳制");
+    clamped.joystickRadius = 0.20;
+    clamped.joystickSprintRadius = 0.05;
+    check(store.save(clamped, &error), "clamped profile save");
+    const ks::Profile clampedLoaded = store.load(QStringLiteral("测试疾跑钳制"), &ok);
+    check(ok && clampedLoaded.joystickSprintRadius >= clampedLoaded.joystickRadius - 1e-6,
+          "sprint radius clamped to inner radius on load");
 
     store.remove(QStringLiteral("测试方案"));
+    store.remove(QStringLiteral("测试疾跑钳制"));
 }
 
 } // namespace
@@ -443,9 +603,13 @@ int main(int argc, char *argv[]) {
 
     testProtocol();
     testJoystick();
+    testJoystickSprint();
     testWasdJoystick();
     testLookEngine();
     testKeymap();
+    testWheelBinding();
+    testKeySuspension();
+    testLookGating();
     testSummonKeyFilter();
     testDirectTouchFilter();
     testRegionJitter();
