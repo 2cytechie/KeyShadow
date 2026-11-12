@@ -9,6 +9,11 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+// 必须在 extern "C" 之外：该头会引入 C++ 的 <d3d11.h>，放进 C 链接会编译失败。
+#include <libavutil/hwcontext_d3d11va.h>
+
+#include <d3d11.h>
+
 #include <cstring>
 
 #include <QDebug>
@@ -51,6 +56,15 @@ enum AVPixelFormat pickHwFormat(AVCodecContext *ctx, const enum AVPixelFormat *p
     return AV_PIX_FMT_NONE;
 }
 
+/// 从 FFmpeg 的硬件设备上下文里取 D3D11 设备（含 FFmpeg 要求的 lock/unlock）。
+AVD3D11VADeviceContext *d3d11HwContext(AVBufferRef *deviceRef) {
+    if (!deviceRef || !deviceRef->data) {
+        return nullptr;
+    }
+    auto *device = reinterpret_cast<AVHWDeviceContext *>(deviceRef->data);
+    return static_cast<AVD3D11VADeviceContext *>(device->hwctx);
+}
+
 void applyExtradata(AVCodecContext *ctx, const QByteArray &data) {
     if (!ctx || data.isEmpty()) {
         return;
@@ -71,6 +85,11 @@ VideoDecoder::~VideoDecoder() { close(); }
 
 bool VideoDecoder::open(quint32 codecTag, QString *error) {
     close();
+
+    // 未设置时默认开启；KEYSHADOW_DEFER_READBACK=0 可强制走旧路径（A/B 与应急回退）。
+    m_deferReadback = !qEnvironmentVariableIsSet("KEYSHADOW_DEFER_READBACK") ||
+                      qEnvironmentVariableIntValue("KEYSHADOW_DEFER_READBACK") != 0;
+    m_deferFailed = false;
 
     const AVCodecID codecId = codecIdFromTag(codecTag);
     m_codecName = codecNameFromTag(codecTag);
@@ -175,6 +194,8 @@ bool VideoDecoder::openContext(const char *name, QString *error) {
 }
 
 void VideoDecoder::close() {
+    // 主线程的 flushPendingFrame 可能正在用 staging 纹理，释放前先串行化。
+    std::lock_guard<std::mutex> lock(m_decodeMutex);
     if (m_packet) {
         av_packet_free(&m_packet);
     }
@@ -189,6 +210,8 @@ void VideoDecoder::close() {
     if (m_ctx) {
         avcodec_free_context(&m_ctx);
     }
+    // 必须在释放硬件设备上下文之前释放 staging 纹理（它们属于那个 D3D11 设备）。
+    releaseStaging();
     if (m_hwDeviceCtx) {
         av_buffer_unref(&m_hwDeviceCtx);
     }
@@ -211,6 +234,8 @@ bool VideoDecoder::decode(const char *data, int size, qint64 pts, bool keyFrame,
         }
         return false;
     }
+    // 与主线程的 flushPendingFrame 串行化（流静止时主线程会把待处理帧取走）。
+    std::lock_guard<std::mutex> lock(m_decodeMutex);
     if (size <= 0) {
         return true;
     }
@@ -269,35 +294,275 @@ void VideoDecoder::drain(const FrameCallback &callback, bool convertAllowed) {
             return;
         }
 
+        const bool hardwareFrame = m_frame->format == AV_PIX_FMT_D3D11 ||
+                                   m_frame->format == AV_PIX_FMT_D3D11VA_VLD;
+
         if (!convertAllowed) {
-            // 解出来的帧不被显示：直接释放，省掉 GPU→CPU 回读 + sws_scale + 新帧分配。
-            // 注意此时解码已经完成，参考帧链完整，不会影响后续帧的正确性。
+            // 解出来的帧不被显示：直接释放，省掉回读与转换。参考帧链完整，不影响后续帧。
+            if (hardwareFrame && deferReadbackEnabled()) {
+                clearPending(); // 待处理帧也不显示，一并丢弃，避免延迟无界增长
+            }
             av_frame_unref(m_frame);
             m_skippedFrames.fetch_add(1);
             continue;
         }
 
-        AVFrame *source = m_frame;
-        if (m_frame->format == AV_PIX_FMT_D3D11 || m_frame->format == AV_PIX_FMT_D3D11VA_VLD) {
-            // 复用回读目标缓冲：每帧重建 7MB 缓冲（malloc + 缺页）本身就要几毫秒。
-            // 仅在分辨率变化时重新分配。
-            if (m_swWidth != m_frame->width || m_swHeight != m_frame->height) {
-                av_frame_unref(m_swFrame);
-                m_swWidth = m_frame->width;
-                m_swHeight = m_frame->height;
-            }
-            if (av_hwframe_transfer_data(m_swFrame, m_frame, 0) == 0) {
-                source = m_swFrame;
-            } else {
+        if (hardwareFrame && deferReadbackEnabled()) {
+            // 环形回读：先把上一帧（GPU 早已拷完）Map + 转换发出去，再把本帧提交进另一个槽。
+            if (emitPendingFrame(callback) && stageHwFrame(m_frame)) {
                 av_frame_unref(m_frame);
                 continue;
             }
+            // 任一环节不支持/失败：本解码器实例内永久退回旧路径，本帧按旧路径处理。
+            clearPending();
+            m_deferFailed = true;
+            qWarning() << "deferred readback unavailable, falling back to av_hwframe_transfer_data";
         }
 
-
-        convertAndEmit(source, callback);
+        emitFrameLegacy(m_frame, callback);
         av_frame_unref(m_frame);
     }
+}
+
+void VideoDecoder::emitFrameLegacy(AVFrame *frame, const FrameCallback &callback) {
+    AVFrame *source = frame;
+    if (frame->format == AV_PIX_FMT_D3D11 || frame->format == AV_PIX_FMT_D3D11VA_VLD) {
+        // 复用回读目标缓冲：每帧重建 7MB 缓冲（malloc + 缺页）本身就要几毫秒。
+        if (m_swWidth != frame->width || m_swHeight != frame->height) {
+            av_frame_unref(m_swFrame);
+            m_swWidth = frame->width;
+            m_swHeight = frame->height;
+        }
+        if (av_hwframe_transfer_data(m_swFrame, frame, 0) != 0) {
+            return;
+        }
+        source = m_swFrame;
+    }
+    convertAndEmit(source, callback);
+}
+
+qint64 VideoDecoder::pendingAgeMs() const {
+    const qint64 stagedAt = m_pendingAtMs.load(std::memory_order_relaxed);
+    return stagedAt < 0 ? -1 : monotonicNowMs() - stagedAt;
+}
+
+void VideoDecoder::flushPendingFrame(const FrameCallback &callback) {
+    if (!hasPendingFrame()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_decodeMutex);
+    emitPendingFrame(callback);
+}
+
+void VideoDecoder::clearPending() {
+    m_pendingSlot = -1;
+    m_pendingAtMs.store(-1, std::memory_order_relaxed);
+}
+
+void VideoDecoder::releaseStaging() {
+    for (ID3D11Texture2D *&texture : m_staging) {
+        if (texture) {
+            texture->Release();
+            texture = nullptr;
+        }
+    }
+    m_stagingWidth = 0;
+    m_stagingHeight = 0;
+    m_stagingFormat = 0;
+    m_nextSlot = 0;
+    clearPending();
+}
+
+bool VideoDecoder::ensureStaging(unsigned width, unsigned height, unsigned format) {
+    if (m_staging[0] && m_stagingWidth == width && m_stagingHeight == height &&
+        m_stagingFormat == format) {
+        return true;
+    }
+    releaseStaging();
+
+    AVD3D11VADeviceContext *hw = d3d11HwContext(m_hwDeviceCtx);
+    if (!hw || !hw->device) {
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = static_cast<DXGI_FORMAT>(format);
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    for (ID3D11Texture2D *&texture : m_staging) {
+        if (FAILED(hw->device->CreateTexture2D(&desc, nullptr, &texture))) {
+            releaseStaging();
+            return false;
+        }
+    }
+    m_stagingWidth = width;
+    m_stagingHeight = height;
+    m_stagingFormat = format;
+    m_nextSlot = 0;
+    return true;
+}
+
+bool VideoDecoder::stageHwFrame(const AVFrame *frame) {
+    auto *texture = reinterpret_cast<ID3D11Texture2D *>(frame->data[0]);
+    if (!texture) {
+        return false;
+    }
+    const int width = frame->width;
+    const int height = frame->height;
+    if (width <= 0 || height <= 0 || (width & 1) || (height & 1)) {
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC sourceDesc{};
+    texture->GetDesc(&sourceDesc);
+    if (sourceDesc.Format != DXGI_FORMAT_NV12 || sourceDesc.SampleDesc.Count != 1) {
+        return false;
+    }
+    if (static_cast<UINT>(width) > sourceDesc.Width ||
+        static_cast<UINT>(height) > sourceDesc.Height) {
+        return false;
+    }
+
+    AVD3D11VADeviceContext *hw = d3d11HwContext(m_hwDeviceCtx);
+    if (!hw || !hw->device_context) {
+        return false;
+    }
+    if (!ensureStaging(sourceDesc.Width, sourceDesc.Height, sourceDesc.Format)) {
+        return false;
+    }
+
+    const int slot = m_nextSlot;
+    const UINT subresource = D3D11CalcSubresource(
+        0, static_cast<UINT>(reinterpret_cast<intptr_t>(frame->data[1])), sourceDesc.MipLevels);
+    // CopySubresourceRegion 只是提交，不等待 GPU；等待被推迟到下一帧的 Map。
+    if (hw->lock) {
+        hw->lock(hw->lock_ctx);
+    }
+    hw->device_context->CopySubresourceRegion(m_staging[slot], 0, 0, 0, 0, texture, subresource,
+                                              nullptr);
+    if (hw->unlock) {
+        hw->unlock(hw->lock_ctx);
+    }
+
+    m_pendingSlot = slot;
+    m_nextSlot ^= 1;
+    m_pendingWidth = width;
+    m_pendingHeight = height;
+    m_pendingPts = frame->pts;
+    m_pendingStagedAtMs = monotonicNowMs();
+    m_pendingAtMs.store(m_pendingStagedAtMs, std::memory_order_relaxed);
+    return true;
+}
+
+bool VideoDecoder::emitPendingFrame(const FrameCallback &callback) {
+    const int slot = m_pendingSlot;
+    if (slot < 0) {
+        return true;
+    }
+    ID3D11Texture2D *texture = m_staging[slot];
+    const int width = m_pendingWidth;
+    const int height = m_pendingHeight;
+    const qint64 pts = m_pendingPts;
+    const qint64 stagedAt = m_pendingStagedAtMs;
+    const unsigned textureHeight = m_stagingHeight;
+    clearPending();
+    if (!texture) {
+        return true;
+    }
+
+    AVD3D11VADeviceContext *hw = d3d11HwContext(m_hwDeviceCtx);
+    if (!hw || !hw->device_context) {
+        return false;
+    }
+
+    if (hw->lock) {
+        hw->lock(hw->lock_ctx);
+    }
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(hw->device_context->Map(texture, 0, D3D11_MAP_READ, 0, &mapped))) {
+        if (hw->unlock) {
+            hw->unlock(hw->lock_ctx);
+        }
+        return false;
+    }
+    if (!ensureSws(width, height, AV_PIX_FMT_NV12)) {
+        hw->device_context->Unmap(texture, 0);
+        if (hw->unlock) {
+            hw->unlock(hw->lock_ctx);
+        }
+        return false;
+    }
+
+    VideoFramePtr out = makeFrame(width, height, pts, stagedAt);
+    uint8_t *dstData[4] = {reinterpret_cast<uint8_t *>(out->y.data()),
+                           reinterpret_cast<uint8_t *>(out->u.data()),
+                           reinterpret_cast<uint8_t *>(out->v.data()), nullptr};
+    int dstLinesize[4] = {out->yStride, out->uStride, out->vStride, 0};
+
+    // NV12 映射布局：Y 在前，UV 紧随其后；UV 偏移必须用纹理高度（可能大于显示高度）。
+    const int rowPitch = static_cast<int>(mapped.RowPitch);
+    const auto *base = static_cast<const uint8_t *>(mapped.pData);
+    const uint8_t *srcData[3] = {
+        base, base + static_cast<size_t>(rowPitch) * textureHeight, nullptr};
+    const int srcLinesize[3] = {rowPitch, rowPitch, 0};
+    sws_scale(m_sws, srcData, srcLinesize, 0, height, dstData, dstLinesize);
+
+    hw->device_context->Unmap(texture, 0);
+    if (hw->unlock) {
+        hw->unlock(hw->lock_ctx);
+    }
+    callback(out);
+    return true;
+}
+
+VideoFramePtr VideoDecoder::makeFrame(int width, int height, qint64 pts, qint64 decodedAtMs) {
+    auto out = std::make_shared<VideoFrame>();
+    out->width = width;
+    out->height = height;
+    out->pts = pts;
+    out->decodedAtMs = decodedAtMs;
+    // 直接在目标缓冲上做转换，避免额外一次拷贝
+    out->yStride = width;
+    out->uStride = (width + 1) / 2;
+    out->vStride = (width + 1) / 2;
+    out->y.resize(out->yStride * height);
+    out->u.resize(out->uStride * ((height + 1) / 2));
+    out->v.resize(out->vStride * ((height + 1) / 2));
+    return out;
+}
+
+bool VideoDecoder::ensureSws(int width, int height, int format) {
+    if (m_sws && m_swsWidth == width && m_swsHeight == height && m_swsFormat == format) {
+        return true;
+    }
+    if (m_sws) {
+        sws_freeContext(m_sws);
+        m_sws = nullptr;
+    }
+    // 尺寸相同，只是像素格式转换（NV12 → YUV420P）：SWS_POINT 足够且最省。
+    // 实测手写的标量拆交织反而比 sws 的 SIMD 实现慢约 1.5ms，故保留 sws。
+    m_sws = sws_getContext(width, height, static_cast<AVPixelFormat>(format), width, height,
+                           AV_PIX_FMT_YUV420P, SWS_POINT, nullptr, nullptr, nullptr);
+    m_swsWidth = width;
+    m_swsHeight = height;
+    m_swsFormat = format;
+    return m_sws != nullptr;
+}
+
+void VideoDecoder::logFormatOnce(int format) {
+    if (m_loggedFormat) {
+        return;
+    }
+    m_loggedFormat = true;
+    qInfo() << "video pixel format"
+            << av_get_pix_fmt_name(static_cast<AVPixelFormat>(format));
 }
 
 void VideoDecoder::convertAndEmit(AVFrame *frame, const FrameCallback &callback) {
@@ -307,40 +572,12 @@ void VideoDecoder::convertAndEmit(AVFrame *frame, const FrameCallback &callback)
         return;
     }
 
-    auto out = std::make_shared<VideoFrame>();
-    out->width = width;
-    out->height = height;
-    out->pts = frame->pts;
-    out->decodedAtMs = monotonicNowMs();
-
-    // 直接在目标缓冲上做转换，避免额外一次拷贝
-    out->yStride = width;
-    out->uStride = (width + 1) / 2;
-    out->vStride = (width + 1) / 2;
-    out->y.resize(out->yStride * height);
-    out->u.resize(out->uStride * ((height + 1) / 2));
-    out->v.resize(out->vStride * ((height + 1) / 2));
-
-    // 尺寸相同，只是像素格式转换（NV12 → YUV420P）：SWS_POINT 足够且最省。
-    // 实测手写的标量拆交织反而比 sws 的 SIMD 实现慢约 1.5ms，故保留 sws。
-    const AVPixelFormat srcFormat = static_cast<AVPixelFormat>(frame->format);
-    if (!m_loggedFormat) {
-        m_loggedFormat = true;
-        qInfo() << "video pixel format" << av_get_pix_fmt_name(srcFormat);
-    }
-    if (!m_sws || m_swsWidth != width || m_swsHeight != height || m_swsFormat != srcFormat) {
-        if (m_sws) {
-            sws_freeContext(m_sws);
-        }
-        m_sws = sws_getContext(width, height, srcFormat, width, height, AV_PIX_FMT_YUV420P,
-                               SWS_POINT, nullptr, nullptr, nullptr);
-        m_swsWidth = width;
-        m_swsHeight = height;
-        m_swsFormat = srcFormat;
-    }
-    if (!m_sws) {
+    logFormatOnce(frame->format);
+    if (!ensureSws(width, height, frame->format)) {
         return;
     }
+
+    VideoFramePtr out = makeFrame(width, height, frame->pts, monotonicNowMs());
     uint8_t *dstData[4] = {reinterpret_cast<uint8_t *>(out->y.data()),
                            reinterpret_cast<uint8_t *>(out->u.data()),
                            reinterpret_cast<uint8_t *>(out->v.data()), nullptr};
@@ -354,8 +591,10 @@ void VideoDecoder::flush(const FrameCallback &callback) {
     if (!m_ctx) {
         return;
     }
+    std::lock_guard<std::mutex> lock(m_decodeMutex);
     avcodec_send_packet(m_ctx, nullptr);
     drain(callback, true);
+    emitPendingFrame(callback);
 }
 
 } // namespace ks

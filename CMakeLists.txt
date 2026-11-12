@@ -83,7 +83,7 @@ target_include_directories(keyshadow_core PUBLIC src)
 target_link_libraries(keyshadow_core PUBLIC
     Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGLWidgets Qt6::Network Qt6::Concurrent
     FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale FFmpeg::swresample
-    ws2_32 winmm ole32 uuid dwmapi shcore
+    ws2_32 winmm ole32 uuid dwmapi shcore d3d11 dxgi
 )
 
 target_compile_definitions(keyshadow_core PUBLIC

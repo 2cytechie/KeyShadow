@@ -235,8 +235,12 @@ int main(int argc, char *argv[]) {
     config.serial = serial;
     config.adbPath = ks::AdbProcess::resolveAdbPath();
     config.serverJarPath = jar;
-    config.videoBitRate = 8000000;
-    config.maxFps = 60;
+    // 允许用环境变量调参，便于对照 60/90/120 帧与不同分辨率。
+    const int probeBitrate = qEnvironmentVariableIntValue("KEYSHADOW_PROBE_BITRATE");
+    config.videoBitRate = probeBitrate > 0 ? probeBitrate : 8000000;
+    const int probeFps = qEnvironmentVariableIntValue("KEYSHADOW_PROBE_MAX_FPS");
+    config.maxFps = probeFps > 0 ? probeFps : 60;
+    config.maxSize = qEnvironmentVariableIntValue("KEYSHADOW_PROBE_MAX_SIZE");
 
     logLine("adb=%s jar=%s serial=%s", qPrintable(config.adbPath),
             qPrintable(config.serverJarPath), qPrintable(serial));

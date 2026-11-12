@@ -99,6 +99,7 @@ Session::Session(QObject *parent) : QObject(parent) {
 
                 m_lastStatsTickMs = monotonicNowMs();
                 m_statsTimer.start();
+                m_frameFlushTimer.start();
             });
     connect(&m_client, &ScrcpyClient::stopped, this, [this] {
         if (m_state != State::Error) {
@@ -112,6 +113,17 @@ Session::Session(QObject *parent) : QObject(parent) {
     m_reconnectTimer.setSingleShot(true);
     m_reconnectTimer.setInterval(1200);
     connect(&m_reconnectTimer, &QTimer::timeout, this, &Session::tryReconnect);
+
+    // 环形回读会把每帧推迟一拍发射。画面静止后不再有新包，最后一帧会一直躺在槽里，
+    // 所以这里兜底：待处理帧超过阈值还没发，就主动取出来显示。
+    // 阈值 40ms 高于 30fps 的帧间隔（33ms），保证正常串流时不会误触发。
+    m_frameFlushTimer.setInterval(20);
+    connect(&m_frameFlushTimer, &QTimer::timeout, this, [this] {
+        if (m_frameFlushTimer.isActive() && m_videoDecoder.pendingAgeMs() >= 40) {
+            m_videoDecoder.flushPendingFrame(
+                [this](const VideoFramePtr &frame) { postDecodedFrame(frame); });
+        }
+    });
 }
 
 Session::~Session() {
@@ -225,6 +237,8 @@ void Session::connectDevice(const QString &serial) {
 
 void Session::stopStreams() {
     m_statsTimer.stop();
+    // 必须在停止读线程/关闭解码器之前停掉，避免与解码线程争用解码器。
+    m_frameFlushTimer.stop();
     if (m_videoReader) {
         m_videoReader->stop();
         m_videoReader.reset();

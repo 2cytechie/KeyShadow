@@ -172,6 +172,7 @@ private:
     std::atomic<double> m_decodeAccumMs{0.0};
     std::atomic<qint64> m_decodeSamples{0};
     QTimer m_reconnectTimer;
+    QTimer m_frameFlushTimer; ///< 流静止时把环形回读里滞留的最后一帧取出来
     bool m_screenOff = false;
     int m_summonKey = 0x12; ///< VK_MENU
     bool m_summonDown = false;

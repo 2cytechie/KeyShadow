@@ -4,6 +4,7 @@
 #include <QString>
 #include <atomic>
 #include <functional>
+#include <mutex>
 
 #include "core/video/VideoFrame.h"
 
@@ -12,6 +13,7 @@ struct AVFrame;
 struct AVPacket;
 struct AVBufferRef;
 struct SwsContext;
+struct ID3D11Texture2D;
 
 namespace ks {
 
@@ -48,6 +50,13 @@ public:
     /// 取走并清零被跳过的解码帧数（convertAllowed=false 造成的）。
     qint64 takeSkippedFrames() { return m_skippedFrames.exchange(0); }
 
+    /// 环形回读：是否有已拷贝、尚未转换发出的帧。
+    bool hasPendingFrame() const { return m_pendingAtMs.load(std::memory_order_relaxed) >= 0; }
+    /// 待处理帧已停留多久（毫秒），无待处理帧返回 -1。用于判断流是否已静止。
+    qint64 pendingAgeMs() const;
+    /// 把待处理帧 Map + 转换并发出。由主线程在流静止时调用（内部加锁）。
+    void flushPendingFrame(const FrameCallback &callback);
+
     bool hardwareAccelerated() const { return m_hwAccelerated; }
     QString codecName() const { return m_codecName; }
     QString errorString() const { return m_error; }
@@ -56,6 +65,20 @@ private:
     bool openContext(const char *name, QString *error);
     void convertAndEmit(AVFrame *frame, const FrameCallback &callback);
     void drain(const FrameCallback &callback, bool convertAllowed);
+    /// 旧路径：硬件帧先 av_hwframe_transfer_data 到 m_swFrame，再交给 sws。
+    void emitFrameLegacy(AVFrame *frame, const FrameCallback &callback);
+
+    VideoFramePtr makeFrame(int width, int height, qint64 pts, qint64 decodedAtMs);
+    bool ensureSws(int width, int height, int format);
+    void logFormatOnce(int format);
+
+    /// 环形回读内部实现（调用方需持有 m_decodeMutex）。
+    bool deferReadbackEnabled() const { return m_deferReadback && !m_deferFailed; }
+    bool ensureStaging(unsigned width, unsigned height, unsigned format);
+    bool stageHwFrame(const AVFrame *frame);
+    bool emitPendingFrame(const FrameCallback &callback);
+    void releaseStaging();
+    void clearPending();
 
     AVCodecContext *m_ctx = nullptr;
     AVBufferRef *m_hwDeviceCtx = nullptr;
@@ -70,6 +93,22 @@ private:
     bool m_loggedFormat = false;
     int m_swWidth = 0;  ///< m_swFrame 当前缓冲区尺寸（变化时才重新分配）
     int m_swHeight = 0;
+
+    // ---- 环形延迟回读：本帧只提交 GPU 拷贝，下一帧再把上一帧 Map 出来 ----
+    std::mutex m_decodeMutex; ///< 串行化 decode/drain 与主线程的 flushPendingFrame
+    ID3D11Texture2D *m_staging[2] = {nullptr, nullptr};
+    unsigned m_stagingWidth = 0;
+    unsigned m_stagingHeight = 0; ///< 用于 UV 平面偏移，必须用纹理高度而非显示高度
+    unsigned m_stagingFormat = 0;
+    int m_nextSlot = 0;
+    int m_pendingSlot = -1;
+    int m_pendingWidth = 0;
+    int m_pendingHeight = 0;
+    qint64 m_pendingPts = 0;
+    qint64 m_pendingStagedAtMs = 0;
+    std::atomic<qint64> m_pendingAtMs{-1};
+    bool m_deferReadback = true;
+    bool m_deferFailed = false;
     std::atomic<qint64> m_skippedFrames{0};
     QString m_codecName;
     QString m_error;
