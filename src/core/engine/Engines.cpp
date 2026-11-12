@@ -32,21 +32,6 @@ QPointF jitteredCenter(HumanizerEngine *humanizer, const QPointF &centerPx, doub
                    std::clamp(shifted.y(), 0.0, std::max(0, screenHeight - 1) * 1.0));
 }
 
-qint64 qpcNow() {
-    LARGE_INTEGER value;
-    QueryPerformanceCounter(&value);
-    return value.QuadPart;
-}
-
-double qpcFrequency() {
-    static double freq = [] {
-        LARGE_INTEGER value;
-        QueryPerformanceFrequency(&value);
-        return static_cast<double>(value.QuadPart);
-    }();
-    return freq;
-}
-
 double easeOutCubic(double t) {
     const double inv = 1.0 - t;
     return 1.0 - inv * inv * inv;
@@ -63,6 +48,21 @@ QByteArray touchMessage(quint64 pointer, proto::TouchAction action, const QPoint
 }
 
 } // namespace
+
+qint64 qpcNowTicks() {
+    LARGE_INTEGER value;
+    QueryPerformanceCounter(&value);
+    return value.QuadPart;
+}
+
+double qpcFrequencyHz() {
+    static const double freq = [] {
+        LARGE_INTEGER value;
+        QueryPerformanceFrequency(&value);
+        return static_cast<double>(value.QuadPart);
+    }();
+    return freq;
+}
 
 bool vkMatchesSummon(int eventVk, int summonVk) {
     switch (summonVk) {
@@ -665,8 +665,12 @@ void InputEngine::handleInput(const InputEvent &event) {
         }
     }
 
+    // 采集时刻戳由 RawInputFilter 打（GUI 线程）；滚轮等无戳来源在此补戳。
+    // 不再无条件覆盖，否则「GUI 线程排队 → 注入线程」的延迟会被抹掉。
     InputEvent stamped = event;
-    stamped.timestampNs = qpcNow();
+    if (stamped.timestampNs <= 0) {
+        stamped.timestampNs = qpcNowTicks();
+    }
     m_lastInputQpc = stamped.timestampNs;
     m_pendingEvents.append(stamped);
 }
@@ -700,7 +704,8 @@ void InputEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &
     m_keymap.tick(dtMs, send);
 
     if (hadEvents && m_lastInputQpc > 0) {
-        const double elapsedMs = (qpcNow() - m_lastInputQpc) / qpcFrequency() * 1000.0;
+        // 从「系统采集到按键」算到「触控指令发出」，包含 GUI 线程排队时间。
+        const double elapsedMs = (qpcNowTicks() - m_lastInputQpc) * 1000.0 / qpcFrequencyHz();
         m_latencyMs = elapsedMs;
     }
 }

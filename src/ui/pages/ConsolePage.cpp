@@ -12,6 +12,7 @@
 
 #include <QApplication>
 #include <QButtonGroup>
+#include <QDebug>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
@@ -972,6 +973,7 @@ void ConsolePage::applyVideoOptions() {
 
 void ConsolePage::updateStatsUi() {
     const Session::Stats stats = m_session->stats();
+    const double presentMs = m_video ? m_video->presentLatencyMs() : -1.0;
 
     m_fpsLabel->setText(stats.fps > 0.5 ? QString::number(std::lround(stats.fps))
                                         : QStringLiteral("--"));
@@ -982,17 +984,20 @@ void ConsolePage::updateStatsUi() {
         const QString latency = stats.inputLatencyMs >= 0
                                     ? QString::number(stats.inputLatencyMs, 'f', 1)
                                     : QStringLiteral("--");
-        m_statsOverlay->setText(
-            QStringLiteral("%1 FPS · %2 Mbps · %3 ms").arg(fps, mbps, latency));
+        const QString present = presentMs >= 0 ? QString::number(presentMs, 'f', 0)
+                                               : QStringLiteral("--");
+        m_statsOverlay->setText(QStringLiteral("%1 FPS · %2 Mbps · 输入 %3 ms · 显示 %4 ms")
+                                    .arg(fps, mbps, latency, present));
         m_statsOverlay->adjustSize();
         layoutVideoOverlays();
     }
+    // 这里量的是「系统采集按键 → 触控指令发出」，已包含 GUI 线程排队时间。
     const double latency = stats.inputLatencyMs;
     if (latency >= 0) {
         m_latencyLabel->setText(QStringLiteral("%1 ms").arg(latency, 0, 'f', 1));
-        m_latencyLabel->setProperty("state", latency > 100 ? "danger"
-                                        : latency > 60  ? "warning"
-                                                        : "success");
+        m_latencyLabel->setProperty("state", latency > 12 ? "danger"
+                                        : latency > 6  ? "warning"
+                                                       : "success");
     } else {
         m_latencyLabel->setText(QStringLiteral("-- ms"));
     }
@@ -1007,14 +1012,14 @@ void ConsolePage::updateStatsUi() {
     m_statusAdb->style()->polish(m_statusAdb);
 
     m_statusBitrate->setText(QStringLiteral("%1 Mbps").arg(stats.bitrateMbps, 0, 'f', 1));
-    if (latency >= 0) {
-        m_statusLatency->setText(QStringLiteral("注入 %1 ms · 解码 %2 ms")
-                                     .arg(latency, 0, 'f', 1)
-                                     .arg(stats.decodeMs, 0, 'f', 1));
-    } else {
-        m_statusLatency->setText(QStringLiteral("注入 -- ms · 解码 %1 ms")
-                                     .arg(stats.decodeMs, 0, 'f', 1));
-    }
+    m_statusLatency->setText(QStringLiteral("输入 %1 ms · 解码 %2 ms · 跳过 %3/s · 积压 %4 KB")
+                                 .arg(latency >= 0 ? QString::number(latency, 'f', 1)
+                                                   : QStringLiteral("--"))
+                                 .arg(stats.decodeMs, 0, 'f', 1)
+                                 .arg(std::lround(stats.skippedFps))
+                                 .arg(stats.backlogKb >= 0
+                                          ? QString::number(std::lround(stats.backlogKb))
+                                          : QStringLiteral("--")));
     m_statusCodec->setText(
         QStringLiteral("%1 · %2×%3 · %4")
             .arg(stats.videoCodec.isEmpty() ? QStringLiteral("--") : stats.videoCodec.toUpper())
@@ -1024,6 +1029,18 @@ void ConsolePage::updateStatsUi() {
 
     if (!m_video->hasFrame() && stats.videoWidth > 0 && stats.videoHeight > 0) {
         m_video->setFallbackAspect(stats.videoWidth / static_cast<double>(stats.videoHeight));
+    }
+
+    // 每秒一行链路指标，便于真机对比不同帧率下的积压趋势（也方便用户反馈问题）。
+    if (m_session->state() == Session::State::Streaming) {
+        qInfo().nospace() << "stats fps=" << QString::number(stats.fps, 'f', 1)
+                          << " skip=" << QString::number(stats.skippedFps, 'f', 1)
+                          << " decode=" << QString::number(stats.decodeMs, 'f', 1)
+                          << "ms input=" << QString::number(stats.inputLatencyMs, 'f', 1)
+                          << "ms present=" << QString::number(presentMs, 'f', 1)
+                          << "ms pending=" << stats.pendingFrame
+                          << " backlog=" << QString::number(stats.backlogKb, 'f', 0) << "KB"
+                          << " target=" << m_session->profile().maxFps;
     }
 
     if (m_qualityInfo) {

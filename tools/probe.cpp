@@ -2,6 +2,7 @@
 // 用法：keyshadow_probe.exe <serial> [scrcpy-server.jar 路径]
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QTimer>
 
@@ -86,6 +87,8 @@ int main(int argc, char *argv[]) {
 
     int frames = 0;
     int audioPackets = 0;
+    qint64 decodeAccumNs = 0;
+    int decodeSamples = 0;
     int width = 0;
     int height = 0;
     quint32 codecTag = 0;
@@ -145,6 +148,13 @@ int main(int argc, char *argv[]) {
                                              decoder.hardwareAccelerated() ? "hardware"
                                                                            : "software");
                                  }
+                                 QElapsedTimer decodeTimer;
+                                 decodeTimer.start();
+                                 // KEYSHADOW_PROBE_SKIP_CONVERT=1：只解码不回读/不转换，
+                                 // 用于量出 GPU→CPU 回读本身占多少时间。
+                                 const bool convert =
+                                     qEnvironmentVariableIntValue("KEYSHADOW_PROBE_SKIP_CONVERT") !=
+                                     1;
                                  decoder.decode(payload.constData(), payload.size(), pts, key,
                                                 [&](const ks::VideoFramePtr &frame) {
                                                     frames += 1;
@@ -168,7 +178,10 @@ int main(int argc, char *argv[]) {
                                                                       "frame2.png");
                                                         }
                                                     }
-                                                });
+                                                },
+                                                nullptr, convert);
+                                 decodeAccumNs += decodeTimer.nsecsElapsed();
+                                 decodeSamples += 1;
                              },
                              [&](const QString &reason) {
                                  logLine("[video] closed: %s", qPrintable(reason));
@@ -231,7 +244,10 @@ int main(int argc, char *argv[]) {
 
     QTimer stats;
     QObject::connect(&stats, &QTimer::timeout, [&] {
-        logLine("[stat] frames=%d audio=%d session=%dx%d", frames, audioPackets, width, height);
+        const double decodeMs =
+            decodeSamples > 0 ? decodeAccumNs / 1e6 / decodeSamples : 0.0;
+        logLine("[stat] frames=%d audio=%d session=%dx%d decode=%.2fms", frames, audioPackets,
+                width, height, decodeMs);
     });
     stats.start(1000);
 

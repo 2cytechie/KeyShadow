@@ -171,6 +171,14 @@ void ScrcpyStreamReader::run() {
         if (m_onPacket) {
             m_onPacket(payload, pts, isKey, isConfig);
         }
+
+        // 处理完这一包后，内核接收缓冲区里还剩多少：这是「解码追不上」的直接证据。
+        if (m_isVideo) {
+            u_long available = 0;
+            if (::ioctlsocket(socket, FIONREAD, &available) == 0) {
+                m_backlogBytes.store(static_cast<qint64>(available), std::memory_order_relaxed);
+            }
+        }
     }
 
     m_running.store(false);

@@ -27,9 +27,12 @@ public:
     Q_ENUM(State)
 
     struct Stats {
-        double fps = 0.0;
+        double fps = 0.0;            ///< 实际转换并显示出去的帧率
+        double skippedFps = 0.0;     ///< 为压低延迟而跳过转换的帧率
         double decodeMs = 0.0;
-        double inputLatencyMs = -1.0;
+        double inputLatencyMs = -1.0; ///< 系统采集 → 触控指令发出（含 GUI 线程排队）
+        int pendingFrame = 0;         ///< GUI 线程是否有待显示帧（0/1）
+        double backlogKb = -1.0;      ///< 本地接收缓冲区未读字节（KB），持续变大＝解码追不上
         double bitrateMbps = 0.0;
         QString videoCodec;
         int videoWidth = 0;
@@ -113,6 +116,9 @@ private:
     void onVideoCodec(quint32 codecTag);
     void onVideoSession(int width, int height);
     void onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame, bool configPacket);
+    /// 解码线程投递：只保留最新一帧，GUI 线程最多排一个显示事件。
+    void postDecodedFrame(const VideoFramePtr &frame);
+    void deliverLatestFrame();
     void onAudioConfig(const QByteArray &payload);
     void onAudioPacket(const QByteArray &payload);
     void updateStats();
@@ -127,6 +133,15 @@ private:
     std::unique_ptr<ScrcpyStreamReader> m_videoReader;
     std::unique_ptr<ScrcpyStreamReader> m_audioReader;
     VideoDecoder m_videoDecoder;
+
+    // 帧投递合并：解码线程只更新「最新帧槽」，GUI 线程最多排一个显示事件，
+    // 避免高帧率下 GUI 事件队列无限积压（那会连带拖慢 WM_INPUT 键鼠采集）。
+    mutable std::mutex m_frameMutex;
+    VideoFrameConstPtr m_latestFrame;
+    std::atomic<bool> m_framePostPending{false};
+    std::atomic<qint64> m_lastFramePostMs{0};
+    /// 本次连接的帧率上限快照（供读线程判断是否提示软解跟不上，避免跨线程读 m_profile）。
+    std::atomic<int> m_streamMaxFps{60};
     AudioDecoder m_audioDecoder;
     AudioPlayer m_audioPlayer;
     InjectionThread m_injection;

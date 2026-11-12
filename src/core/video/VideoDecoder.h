@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QString>
+#include <atomic>
 #include <functional>
 
 #include "core/video/VideoFrame.h"
@@ -36,10 +37,16 @@ public:
     QByteArray extradata() const { return m_extradata; }
 
     /// 送入一个压缩包；解出的帧通过回调返回（可能 0 帧或多帧）。
+    /// convertAllowed=false 时仍然完整解码（参考帧链不受影响），但跳过 GPU→CPU 回读、
+    /// 色彩转换与回调 —— 用于「上一帧还没显示完，这一帧没必要再转换」的丢帧策略。
     bool decode(const char *data, int size, qint64 pts, bool keyFrame,
-                const FrameCallback &callback, QString *error = nullptr);
+                const FrameCallback &callback, QString *error = nullptr,
+                bool convertAllowed = true);
 
     void flush(const FrameCallback &callback);
+
+    /// 取走并清零被跳过的解码帧数（convertAllowed=false 造成的）。
+    qint64 takeSkippedFrames() { return m_skippedFrames.exchange(0); }
 
     bool hardwareAccelerated() const { return m_hwAccelerated; }
     QString codecName() const { return m_codecName; }
@@ -48,7 +55,7 @@ public:
 private:
     bool openContext(const char *name, QString *error);
     void convertAndEmit(AVFrame *frame, const FrameCallback &callback);
-    void drain(const FrameCallback &callback);
+    void drain(const FrameCallback &callback, bool convertAllowed);
 
     AVCodecContext *m_ctx = nullptr;
     AVBufferRef *m_hwDeviceCtx = nullptr;
@@ -60,6 +67,10 @@ private:
     int m_swsHeight = 0;
     int m_swsFormat = -1;
     bool m_hwAccelerated = false;
+    bool m_loggedFormat = false;
+    int m_swWidth = 0;  ///< m_swFrame 当前缓冲区尺寸（变化时才重新分配）
+    int m_swHeight = 0;
+    std::atomic<qint64> m_skippedFrames{0};
     QString m_codecName;
     QString m_error;
     QByteArray m_extradata;

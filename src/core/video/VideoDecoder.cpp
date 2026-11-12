@@ -5,6 +5,7 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
@@ -183,6 +184,8 @@ void VideoDecoder::close() {
     if (m_swFrame) {
         av_frame_free(&m_swFrame);
     }
+    m_swWidth = 0;
+    m_swHeight = 0;
     if (m_ctx) {
         avcodec_free_context(&m_ctx);
     }
@@ -200,7 +203,8 @@ void VideoDecoder::close() {
 }
 
 bool VideoDecoder::decode(const char *data, int size, qint64 pts, bool keyFrame,
-                          const FrameCallback &callback, QString *error) {
+                          const FrameCallback &callback, QString *error,
+                          bool convertAllowed) {
     if (!m_ctx) {
         if (error) {
             *error = QStringLiteral("解码器未初始化");
@@ -235,6 +239,12 @@ bool VideoDecoder::decode(const char *data, int size, qint64 pts, bool keyFrame,
     }
 
     int ret = avcodec_send_packet(m_ctx, m_packet);
+    if (ret == AVERROR(EAGAIN)) {
+        // 解码器输入队列已满：必须先取走已解出的帧腾出空间，否则这个包会被静默丢弃，
+        // 后续 P 帧引用了不存在的参考帧，画面会花到下一个 IDR。帧率越高越容易触发。
+        drain(callback, convertAllowed);
+        ret = avcodec_send_packet(m_ctx, m_packet);
+    }
     if (ret < 0 && ret != AVERROR(EAGAIN)) {
         if (error) {
             *error = QStringLiteral("送入解码包失败：%1").arg(ret);
@@ -242,14 +252,14 @@ bool VideoDecoder::decode(const char *data, int size, qint64 pts, bool keyFrame,
         return false;
     }
 
-    drain(callback);
+    drain(callback, convertAllowed);
     if (error) {
         error->clear();
     }
     return true;
 }
 
-void VideoDecoder::drain(const FrameCallback &callback) {
+void VideoDecoder::drain(const FrameCallback &callback, bool convertAllowed) {
     for (;;) {
         const int ret = avcodec_receive_frame(m_ctx, m_frame);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
@@ -259,9 +269,23 @@ void VideoDecoder::drain(const FrameCallback &callback) {
             return;
         }
 
+        if (!convertAllowed) {
+            // 解出来的帧不被显示：直接释放，省掉 GPU→CPU 回读 + sws_scale + 新帧分配。
+            // 注意此时解码已经完成，参考帧链完整，不会影响后续帧的正确性。
+            av_frame_unref(m_frame);
+            m_skippedFrames.fetch_add(1);
+            continue;
+        }
+
         AVFrame *source = m_frame;
         if (m_frame->format == AV_PIX_FMT_D3D11 || m_frame->format == AV_PIX_FMT_D3D11VA_VLD) {
-            av_frame_unref(m_swFrame);
+            // 复用回读目标缓冲：每帧重建 7MB 缓冲（malloc + 缺页）本身就要几毫秒。
+            // 仅在分辨率变化时重新分配。
+            if (m_swWidth != m_frame->width || m_swHeight != m_frame->height) {
+                av_frame_unref(m_swFrame);
+                m_swWidth = m_frame->width;
+                m_swHeight = m_frame->height;
+            }
             if (av_hwframe_transfer_data(m_swFrame, m_frame, 0) == 0) {
                 source = m_swFrame;
             } else {
@@ -270,11 +294,9 @@ void VideoDecoder::drain(const FrameCallback &callback) {
             }
         }
 
+
         convertAndEmit(source, callback);
         av_frame_unref(m_frame);
-        if (source == m_swFrame) {
-            av_frame_unref(m_swFrame);
-        }
     }
 }
 
@@ -282,21 +304,6 @@ void VideoDecoder::convertAndEmit(AVFrame *frame, const FrameCallback &callback)
     const int width = frame->width;
     const int height = frame->height;
     if (width <= 0 || height <= 0) {
-        return;
-    }
-
-    const AVPixelFormat srcFormat = static_cast<AVPixelFormat>(frame->format);
-    if (!m_sws || m_swsWidth != width || m_swsHeight != height || m_swsFormat != srcFormat) {
-        if (m_sws) {
-            sws_freeContext(m_sws);
-        }
-        m_sws = sws_getContext(width, height, srcFormat, width, height, AV_PIX_FMT_YUV420P,
-                               SWS_BILINEAR, nullptr, nullptr, nullptr);
-        m_swsWidth = width;
-        m_swsHeight = height;
-        m_swsFormat = srcFormat;
-    }
-    if (!m_sws) {
         return;
     }
 
@@ -314,11 +321,30 @@ void VideoDecoder::convertAndEmit(AVFrame *frame, const FrameCallback &callback)
     out->u.resize(out->uStride * ((height + 1) / 2));
     out->v.resize(out->vStride * ((height + 1) / 2));
 
+    // 尺寸相同，只是像素格式转换（NV12 → YUV420P）：SWS_POINT 足够且最省。
+    // 实测手写的标量拆交织反而比 sws 的 SIMD 实现慢约 1.5ms，故保留 sws。
+    const AVPixelFormat srcFormat = static_cast<AVPixelFormat>(frame->format);
+    if (!m_loggedFormat) {
+        m_loggedFormat = true;
+        qInfo() << "video pixel format" << av_get_pix_fmt_name(srcFormat);
+    }
+    if (!m_sws || m_swsWidth != width || m_swsHeight != height || m_swsFormat != srcFormat) {
+        if (m_sws) {
+            sws_freeContext(m_sws);
+        }
+        m_sws = sws_getContext(width, height, srcFormat, width, height, AV_PIX_FMT_YUV420P,
+                               SWS_POINT, nullptr, nullptr, nullptr);
+        m_swsWidth = width;
+        m_swsHeight = height;
+        m_swsFormat = srcFormat;
+    }
+    if (!m_sws) {
+        return;
+    }
     uint8_t *dstData[4] = {reinterpret_cast<uint8_t *>(out->y.data()),
                            reinterpret_cast<uint8_t *>(out->u.data()),
                            reinterpret_cast<uint8_t *>(out->v.data()), nullptr};
     int dstLinesize[4] = {out->yStride, out->uStride, out->vStride, 0};
-
     sws_scale(m_sws, frame->data, frame->linesize, 0, height, dstData, dstLinesize);
 
     callback(out);
@@ -329,7 +355,7 @@ void VideoDecoder::flush(const FrameCallback &callback) {
         return;
     }
     avcodec_send_packet(m_ctx, nullptr);
-    drain(callback);
+    drain(callback, true);
 }
 
 } // namespace ks

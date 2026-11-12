@@ -52,6 +52,7 @@ bool RawInputFilter::nativeEventFilter(const QByteArray &eventType, void *messag
             if (mouse.lLastX != 0 || mouse.lLastY != 0) {
                 InputEvent event;
                 event.type = InputEventType::MouseMove;
+                event.timestampNs = qpcNowTicks();
                 event.dx = mouse.lLastX;
                 event.dy = mouse.lLastY;
                 if (m_handler) {
@@ -64,6 +65,7 @@ bool RawInputFilter::nativeEventFilter(const QByteArray &eventType, void *messag
         auto emitButton = [this](int button, bool down) {
             InputEvent event;
             event.type = InputEventType::MouseButton;
+            event.timestampNs = qpcNowTicks();
             event.button = button;
             event.down = down;
             if (m_handler) {
@@ -125,6 +127,7 @@ bool RawInputFilter::nativeEventFilter(const QByteArray &eventType, void *messag
 
         InputEvent event;
         event.type = InputEventType::Key;
+        event.timestampNs = qpcNowTicks();
         event.vk = vk;
         event.down = down;
         if (m_handler) {

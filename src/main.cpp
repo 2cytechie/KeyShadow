@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QStandardPaths>
+#include <QSurfaceFormat>
 #include <QTimer>
 
 #include <cstdio>
@@ -127,6 +128,14 @@ int main(int argc, char *argv[]) {
 
     qInstallMessageHandler(messageHandler);
     writeRawLog("---- KeyShadow starting ----\n");
+
+    // 关闭垂直同步：QOpenGLWidget 的呈现默认会阻塞到下一个刷新周期（最长 ~16.7ms），
+    // 而键鼠原始输入（WM_INPUT）恰好也在 GUI 线程分发，那段阻塞会直接叠加成输入延迟。
+    // 代价是可能撕裂；本工具以延迟优先。必须在 QApplication 构造前设置。
+    QSurfaceFormat surfaceFormat = QSurfaceFormat::defaultFormat();
+    surfaceFormat.setSwapInterval(0);
+    surfaceFormat.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
+    QSurfaceFormat::setDefaultFormat(surfaceFormat);
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("KeyShadow"));

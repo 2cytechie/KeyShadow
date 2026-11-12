@@ -294,6 +294,11 @@ void VideoWidget::paintGL() {
     }
     if (dirty) {
         uploadFrame(*frame);
+        // 解码完成 → 真正上传呈现：含帧槽排队时间与上传耗时，反映「看到的画面有多旧」。
+        if (frame->decodedAtMs > 0) {
+            m_presentLatencyMs.store(static_cast<double>(monotonicNowMs() - frame->decodedAtMs),
+                                     std::memory_order_relaxed);
+        }
     }
 
     // 计算信箱区域：保持原始宽高比，不拉伸不裁切

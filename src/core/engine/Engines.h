@@ -20,6 +20,11 @@ int mouseButtonVk(int button);
 constexpr int kVkWheelUp = 0x0A;
 constexpr int kVkWheelDown = 0x0B;
 
+/// 高精度计时（QPC 计数），用于给输入事件打「采集时刻」戳并测量端到端延迟。
+/// RawInputFilter 与注入线程共用同一套实现，保证时间戳可直接相减。
+qint64 qpcNowTicks();
+double qpcFrequencyHz();
+
 // ---------------------------------------------------------------------------
 // 输入事件（由 RawInputFilter 产生，主线程投递到注入线程）
 // ---------------------------------------------------------------------------
@@ -27,7 +32,7 @@ enum class InputEventType { MouseMove, MouseButton, Wheel, Key };
 
 struct InputEvent {
     InputEventType type = InputEventType::Key;
-    qint64 timestampNs = 0;
+    qint64 timestampNs = 0; ///< 采集时刻的 QPC 计数（非纳秒，避免长时间运行后溢出）
     int dx = 0;      ///< MouseMove：相对位移；Wheel：滚轮格数
     int dy = 0;
     int button = 0;  ///< MouseButton：0 左键 1 右键 2 中键

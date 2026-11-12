@@ -205,6 +205,7 @@ void Session::connectDevice(const QString &serial) {
     config.serial = serial;
     config.adbPath = m_adb.adbPath();
     config.serverJarPath = ensureServerJar();
+    m_streamMaxFps.store(m_profile.maxFps);
     config.videoBitRate = m_profile.videoBitRate;
     config.maxFps = m_profile.maxFps;
     config.maxSize = m_profile.maxSize;
@@ -231,6 +232,13 @@ void Session::stopStreams() {
     if (m_audioReader) {
         m_audioReader->stop();
         m_audioReader.reset();
+    }
+    // 读线程已 join，此后不会再有新帧；清空帧槽并放开标志，
+    // 已排队的 deliverLatestFrame 取到空帧后自然变成空操作。
+    {
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        m_latestFrame.reset();
+        m_framePostPending.store(false, std::memory_order_relaxed);
     }
     m_injection.stop();
     m_audioPlayer.stop();
@@ -546,7 +554,21 @@ void Session::onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame
         emit logMessage(QStringLiteral("视频解码：%1（%2）")
                             .arg(codecName, hardwareDecode ? QStringLiteral("硬件")
                                                            : QStringLiteral("软件")));
+        const int streamFps = m_streamMaxFps.load();
+        if (!hardwareDecode && streamFps > 60) {
+            // 软解每帧开销远高于硬解，高帧率下收包线程追不上会持续积压。
+            emit logMessage(QStringLiteral(
+                "当前为软件解码，%1 帧可能跟不上；若出现延迟请降到 60 帧或降低分辨率")
+                                .arg(streamFps));
+        }
     }
+
+    // 上一帧还排在 GUI 线程没显示完，就没必要再回读 + 转换这一帧：
+    // 保留一次「强制转换」的兜底（16ms），避免持续高负载时画面被冻住。
+    constexpr qint64 kHoldCeilingMs = 16;
+    const bool convertAllowed =
+        !m_framePostPending.load(std::memory_order_acquire) ||
+        (monotonicNowMs() - m_lastFramePostMs.load(std::memory_order_relaxed) >= kHoldCeilingMs);
 
     const qint64 start = monotonicNowMs();
     QString error;
@@ -559,14 +581,49 @@ void Session::onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame
                 m_stats.videoWidth = frame->width;
                 m_stats.videoHeight = frame->height;
             }
-            emit frameReady(frame);
+            postDecodedFrame(frame);
         },
-        &error);
+        &error, convertAllowed);
     m_decodeAccumMs.store(m_decodeAccumMs.load(std::memory_order_relaxed) +
                           static_cast<double>(monotonicNowMs() - start));
     m_decodeSamples.fetch_add(1);
     if (!ok && !error.isEmpty()) {
         emit logMessage(QStringLiteral("解码错误：%1").arg(error));
+    }
+}
+
+void Session::postDecodedFrame(const VideoFramePtr &frame) {
+    if (!frame) {
+        return;
+    }
+    bool post = false;
+    {
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        // 旧帧被新帧顶替：它还没被 GUI 取走，属于主动丢弃（不是错误）。
+        m_latestFrame = frame;
+        if (!m_framePostPending.load(std::memory_order_relaxed)) {
+            m_framePostPending.store(true, std::memory_order_relaxed);
+            m_lastFramePostMs.store(monotonicNowMs(), std::memory_order_relaxed);
+            post = true;
+        }
+    }
+    if (post) {
+        QMetaObject::invokeMethod(this, [this] { deliverLatestFrame(); }, Qt::QueuedConnection);
+    }
+}
+
+void Session::deliverLatestFrame() {
+    VideoFrameConstPtr frame;
+    {
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        frame = std::move(m_latestFrame);
+        m_latestFrame.reset();
+        // 与取帧同处一个临界区，且在 emit 之前清零：否则新帧到达时会看到「已有事件在排」，
+        // 从而不再投递，造成最后一帧永远显示不出来。
+        m_framePostPending.store(false, std::memory_order_relaxed);
+    }
+    if (frame) {
+        emit frameReady(frame);
     }
 }
 
@@ -607,11 +664,15 @@ void Session::updateStats() {
     const qint64 bytes = m_byteCounter.exchange(0);
     const qint64 decodeSamples = m_decodeSamples.exchange(0);
     const double decodeAccumMs = m_decodeAccumMs.exchange(0.0);
+    const qint64 skipped = m_videoDecoder.takeSkippedFrames();
 
     Stats snapshot;
     {
         std::lock_guard<std::mutex> lock(m_statsMutex);
         m_stats.fps = frames / elapsedSeconds;
+        m_stats.skippedFps = skipped / elapsedSeconds;
+        m_stats.pendingFrame = m_framePostPending.load(std::memory_order_relaxed) ? 1 : 0;
+        m_stats.backlogKb = m_videoReader ? m_videoReader->backlogBytes() / 1024.0 : -1.0;
         m_stats.bitrateMbps = (bytes * 8.0) / elapsedSeconds / 1'000'000.0;
         m_stats.inputLatencyMs = m_injection.takeLatencyMs();
         m_stats.decodeMs = decodeSamples > 0 ? decodeAccumMs / decodeSamples : 0.0;

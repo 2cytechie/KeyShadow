@@ -3,6 +3,7 @@
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLWidget>
 #include <QRect>
+#include <atomic>
 #include <mutex>
 
 #include "core/video/VideoFrame.h"
@@ -31,6 +32,9 @@ public:
     void setFrame(const VideoFrameConstPtr &frame);
     void clearFrame();
     bool hasFrame() const;
+
+    /// 最近一帧「解码完成 → 上传到 GPU」的耗时（毫秒），无样本返回 -1。
+    double presentLatencyMs() const { return m_presentLatencyMs.load(std::memory_order_relaxed); }
 
     void setEnhanceParams(const EnhanceParams &params);
     EnhanceParams enhanceParams() const { return m_params; }
@@ -69,6 +73,7 @@ private:
     VideoFrameConstPtr m_pendingFrame;
     bool m_frameDirty = false;
     bool m_hasFrame = false;
+    std::atomic<double> m_presentLatencyMs{-1.0};
 
     GLuint m_textures[3] = {0, 0, 0};
     GLuint m_vao = 0;

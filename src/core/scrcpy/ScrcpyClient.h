@@ -40,6 +40,10 @@ public:
     void stop();
     bool isRunning() const { return m_running.load(); }
 
+    /// 本地接收缓冲区里尚未读走的字节数（FIONREAD）。
+    /// 稳定为 0 表示消费跟得上；持续很大说明解码追不上，延迟就堆在这条链路上。
+    qint64 backlogBytes() const { return m_backlogBytes.load(std::memory_order_relaxed); }
+
 private:
     void run();
 
@@ -51,6 +55,7 @@ private:
     ClosedHandler m_onClosed;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stopRequested{false};
+    std::atomic<qint64> m_backlogBytes{0};
     std::thread m_thread;
 };
 
