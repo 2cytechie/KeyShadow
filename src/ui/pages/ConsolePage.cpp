@@ -230,7 +230,7 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
                            1);
     m_bitrateCombo = makeCombo({QStringLiteral("4 Mbps"), QStringLiteral("8 Mbps"),
                                 QStringLiteral("12 Mbps"), QStringLiteral("16 Mbps"),
-                                QStringLiteral("20 Mbps")},
+                                QStringLiteral("24 Mbps"), QStringLiteral("32 Mbps")},
                                1);
 
     layout->addWidget(m_resolutionCombo);
@@ -716,8 +716,7 @@ QWidget *ConsolePage::buildKeymapTab() {
     edit->addWidget(overlapHint);
 
     auto *editHint = new QLabel(
-        QStringLiteral("直通：按下=手指按下 · 抬起=手指抬起 · 多键同按=多指\n"
-                       "拖拽放置 · 滚轮缩放 · Ctrl+滚轮调疾跑大圆 · Delete 删除 · Ctrl+S 保存\n"
+        QStringLiteral("拖拽放置 · 滚轮缩放 · Ctrl+滚轮调疾跑大圆 · Delete 删除 · Ctrl+S 保存\n"
                        "滚轮上下也可绑定：选中按键框后滚动滚轮"),
         m_editBox);
     editHint->setProperty("variant", "micro");
@@ -858,7 +857,10 @@ void ConsolePage::refreshProfileToUi() {
                               : profile.maxFps >= 60 ? 1
                                                      : 0);
     const int mbps = std::max(1, profile.videoBitRate / 1'000'000);
-    const int bitrateIndex = mbps <= 4 ? 0 : mbps <= 8 ? 1 : mbps <= 12 ? 2 : mbps <= 16 ? 3 : 4;
+    const int bitrateIndex = mbps <= 4 ? 0 : mbps <= 8 ? 1 : mbps <= 12 ? 2
+                                                              : mbps <= 16 ? 3
+                                                              : mbps <= 24 ? 4
+                                                                           : 5;
     m_bitrateCombo->setCurrentIndex(bitrateIndex);
 
     VideoWidget::EnhanceParams params;
@@ -957,8 +959,8 @@ void ConsolePage::applyVideoOptions() {
     static const int fpsValues[] = {30, 60, 90, 120};
     profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 3)];
 
-    static const int bitrates[] = {4, 8, 12, 16, 20};
-    profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 4)] * 1'000'000;
+    static const int bitrates[] = {4, 8, 12, 16, 24, 32};
+    profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 5)] * 1'000'000;
 
     m_session->applyProfile(profile, true);
 

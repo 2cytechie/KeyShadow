@@ -60,7 +60,7 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     m_bitrateCombo = new QComboBox(videoSection);
     m_bitrateCombo->addItems({QStringLiteral("4 Mbps"), QStringLiteral("8 Mbps"),
                               QStringLiteral("12 Mbps"), QStringLiteral("16 Mbps"),
-                              QStringLiteral("20 Mbps")});
+                              QStringLiteral("24 Mbps"), QStringLiteral("32 Mbps")});
     addRow(videoSection, QStringLiteral("码率上限"), m_bitrateCombo);
 
     m_screenOffCheck = new QCheckBox(QStringLiteral("开启息屏投屏（Pro）"), videoSection);
@@ -494,8 +494,9 @@ void SettingsPage::syncFromProfile() {
                                                      : 0);
     const int mbps = std::max(1, profile.videoBitRate / 1'000'000);
     m_bitrateCombo->setCurrentIndex(mbps <= 4 ? 0 : mbps <= 8 ? 1 : mbps <= 12 ? 2
-                                                                  : mbps <= 16 ? 3
-                                                                               : 4);
+                                                                : mbps <= 16 ? 3
+                                                                : mbps <= 24 ? 4
+                                                                             : 5);
     m_audioCheck->setChecked(profile.audioEnabled);
     m_screenOffCheck->setChecked(profile.screenOff);
     m_statsOverlayCheck->setChecked(
@@ -522,10 +523,10 @@ void SettingsPage::storeProfile() {
     Profile profile = m_session->profile();
     static const int resolutions[] = {0, 1080, 720, 480};
     static const int fpsValues[] = {30, 60, 90, 120};
-    static const int bitrates[] = {4, 8, 12, 16, 20};
+    static const int bitrates[] = {4, 8, 12, 16, 24, 32};
     profile.maxSize = resolutions[std::clamp(m_resolutionCombo->currentIndex(), 0, 3)];
     profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 3)];
-    profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 4)] * 1'000'000;
+    profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 5)] * 1'000'000;
     profile.audioEnabled = m_audioCheck->isChecked();
     m_session->applyProfile(profile, true);
 }
