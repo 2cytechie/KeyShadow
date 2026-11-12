@@ -193,16 +193,74 @@ void testLookEngine() {
     }
     check(upCount >= 1, "look engine lifts and recenters beyond boundary");
 
-    // 触点必须始终在触发区内
+    // 触点必须始终在触发区内（中心本身带 ±6% 半径拟人化抖动，容差 = 200 + 16）
     bool inside = true;
     for (const QByteArray &message : messages) {
         const int x = static_cast<int>(read32(message, 10));
         const int y = static_cast<int>(read32(message, 14));
-        if (std::abs(x - 500) > 200 + 2 || std::abs(y - 500) > 200 + 2) {
+        if (std::abs(x - 500) > 216 || std::abs(y - 500) > 216) {
             inside = false;
         }
     }
     check(inside, "look touch stays within radius");
+}
+
+// ---------------------------------------------------------------------------
+// lift-recenter 回中时序：Up 与回中 Down 必须跨 tick 分开，Down 当帧不携带 Move
+// ---------------------------------------------------------------------------
+void testLookRecenterTiming() {
+    ks::HumanizerEngine humanizer;
+    humanizer.setEnabled(false); // 确定坐标
+    ks::LookEngine look;
+    look.configure(QPointF(0.5, 0.5), 0.2, 1.0, 1000.0, 1000, 1000);
+    look.setHumanizer(&humanizer);
+
+    std::vector<QByteArray> messages;
+    auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
+    auto actionOf = [](const QByteArray &m) { return static_cast<quint8>(m.at(1)); };
+
+    // 首次输入：第一 tick 只发 Down，不携带任何 Move
+    look.addDelta(3000, 0, 0);
+    look.tick(4, sink);
+    check(messages.size() == 1 && actionOf(messages.front()) == 0,
+          "first tick emits only the DOWN");
+    messages.clear();
+
+    // 第二 tick：移动到边界并以 Up 结尾
+    look.tick(4, sink);
+    check(!messages.empty() && actionOf(messages.back()) == 1,
+          "boundary tick ends with UP");
+    messages.clear();
+
+    // 回中间隔内（<10ms）不得重新按下
+    look.tick(4, sink);
+    check(messages.empty(), "no recenter DOWN within 4ms");
+    look.tick(4, sink);
+    check(messages.empty(), "no recenter DOWN within 8ms");
+    look.tick(4, sink);
+    check(messages.size() == 1 && actionOf(messages.front()) == 0,
+          "recenter DOWN after >=10ms gap");
+    messages.clear();
+
+    // 回中按下后下一 tick 才恢复移动
+    look.tick(4, sink);
+    bool hasMove = false;
+    bool hasDown = false;
+    for (const QByteArray &m : messages) {
+        if (actionOf(m) == 2) {
+            hasMove = true;
+        }
+        if (actionOf(m) == 0) {
+            hasDown = true;
+        }
+    }
+    check(hasMove && !hasDown, "movement resumes on the next tick without re-DOWN");
+}
+
+// ---------------------------------------------------------------------------
+void testMouseButtonVk() {
+    check(ks::mouseButtonVk(3) == 0x05, "mouse button 3 maps to VK_XBUTTON1");
+    check(ks::mouseButtonVk(4) == 0x06, "mouse button 4 maps to VK_XBUTTON2");
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +664,8 @@ int main(int argc, char *argv[]) {
     testJoystickSprint();
     testWasdJoystick();
     testLookEngine();
+    testLookRecenterTiming();
+    testMouseButtonVk();
     testKeymap();
     testWheelBinding();
     testKeySuspension();

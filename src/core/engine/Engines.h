@@ -188,6 +188,13 @@ private:
     QPointF m_fingerPixel;
     bool m_active = false;
     qint64 m_lastEventNs = 0;
+
+    // lift-recenter 状态机：到边界先 Up，延迟数毫秒再回中 Down（Down 当帧不移动），
+    // 给手机端明确的「抬起 → 重新按下」序列，避免回中跳变被解释为一次反向拖动。
+    bool m_recentering = false; ///< 已发 Up，等待回中 Down
+    int m_recenterDelayMs = 0;  ///< 距回中 Down 的倒计时
+    double m_pendingX = 0.0;    ///< 回中后待消费的像素位移（边界处未走完的部分）
+    double m_pendingY = 0.0;
 };
 
 // ---------------------------------------------------------------------------

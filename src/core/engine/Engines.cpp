@@ -13,7 +13,12 @@ namespace {
 
 constexpr quint64 kJoystickPointer = 0;
 constexpr quint64 kLookPointer = 1;
-constexpr quint64 kMaxPointer = 15;
+/// 键位/滚轮触点分配上限：10 保留给窗口态直操（ConsolePage::sendPointerTouch），
+/// 避免键位触点与直操触点同 id 冲突。
+constexpr quint64 kMaxPointer = 9;
+
+/// lift-recenter 回中间隔：Up 后至少隔这么久才重新 Down，让手机端把两次按下区分开。
+constexpr int kRecenterGapMs = 10;
 
 /// 区域中心抖动：每次按下/回中时在 ±(半径比例) 内随机偏移，并钳制在屏幕内。
 QPointF jitteredCenter(HumanizerEngine *humanizer, const QPointF &centerPx, double radiusPx,
@@ -265,6 +270,10 @@ void LookEngine::reset() {
     m_accumX = 0.0;
     m_accumY = 0.0;
     m_active = false;
+    m_recentering = false;
+    m_recenterDelayMs = 0;
+    m_pendingX = 0.0;
+    m_pendingY = 0.0;
 }
 
 void LookEngine::release(const std::function<void(const QByteArray &)> &send) {
@@ -283,34 +292,57 @@ void LookEngine::emitTouch(const std::function<void(const QByteArray &)> &send, 
 }
 
 bool LookEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &send) {
-    (void)dtMs;
-    if (std::abs(m_accumX) < 0.5 && std::abs(m_accumY) < 0.5) {
-        return false;
-    }
-
     const QPointF centerPx = toPixel(m_center, m_screenWidth, m_screenHeight);
     const double radiusX = m_radius * m_screenWidth;
     const double radiusY = m_radius * m_screenHeight;
     const double pixelsPerCount = radiusX / m_countsPer180;
 
-    if (!m_active) {
+    // 阶段 A：回中等待。Up 已发出，倒计时结束后才重新 Down（Down 当帧不移动），
+    // 让手机端把「抬起 → 重新按下」当成两次独立触控，避免回中跳变被算成反向拖动。
+    if (m_recentering) {
+        m_recenterDelayMs -= dtMs;
+        if (m_recenterDelayMs > 0) {
+            return false;
+        }
+        m_recentering = false;
         m_active = true;
-        // 每次按下对视角区域中心做拟人化抖动。
-        m_basePixel = jitteredCenter(m_humanizer, centerPx, m_radius * std::min(m_screenWidth,
-                                                                               m_screenHeight),
+        m_basePixel = jitteredCenter(m_humanizer, centerPx,
+                                     m_radius * std::min(m_screenWidth, m_screenHeight),
                                      m_screenWidth, m_screenHeight);
         m_fingerPixel = m_basePixel;
         emitTouch(send, static_cast<int>(proto::TouchAction::Down),
                   static_cast<int>(std::lround(m_basePixel.x())),
                   static_cast<int>(std::lround(m_basePixel.y())));
+        return true;
     }
 
-    double remainingX = m_accumX * pixelsPerCount;
-    double remainingY = m_accumY * pixelsPerCount;
+    if (!m_active) {
+        const bool hasPending = std::abs(m_pendingX) > 0.01 || std::abs(m_pendingY) > 0.01;
+        const bool hasAccum = std::abs(m_accumX) >= 0.5 || std::abs(m_accumY) >= 0.5;
+        if (!hasPending && !hasAccum) {
+            return false;
+        }
+        // 首次按下：Down 当帧不移动，避免按下帧就携带大位移。
+        m_active = true;
+        m_basePixel = jitteredCenter(m_humanizer, centerPx,
+                                     m_radius * std::min(m_screenWidth, m_screenHeight),
+                                     m_screenWidth, m_screenHeight);
+        m_fingerPixel = m_basePixel;
+        emitTouch(send, static_cast<int>(proto::TouchAction::Down),
+                  static_cast<int>(std::lround(m_basePixel.x())),
+                  static_cast<int>(std::lround(m_basePixel.y())));
+        return true;
+    }
+
+    double remainingX = m_accumX * pixelsPerCount + m_pendingX;
+    double remainingY = m_accumY * pixelsPerCount + m_pendingY;
     m_accumX = 0.0;
     m_accumY = 0.0;
+    m_pendingX = 0.0;
+    m_pendingY = 0.0;
 
-    // lift-recenter 循环：手指滑到边界 → 抬起 → 回中心 → 继续，实现无限转向
+    // lift-recenter：手指滑到边界 → Up →（下一 tick 起延迟回中 Down）→ 继续。
+    // 未走完的位移缓存到 pending，回中后接着消费，不丢距离。
     int guard = 0;
     while ((std::abs(remainingX) > 0.01 || std::abs(remainingY) > 0.01) && guard++ < 16) {
         const double roomX = remainingX >= 0 ? (m_basePixel.x() + radiusX - m_fingerPixel.x())
@@ -321,18 +353,15 @@ bool LookEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &s
         const double stepY = std::clamp(remainingY, -std::max(0.0, roomY), std::max(0.0, roomY));
 
         if (std::abs(stepX) < 0.01 && std::abs(stepY) < 0.01) {
-            // 已到边界：抬起 → 回中心重新按下（回中时重新抖动）
+            // 已到边界：抬起，进入回中等待；剩余位移留到回中后继续。
             emitTouch(send, static_cast<int>(proto::TouchAction::Up),
                       static_cast<int>(std::lround(m_fingerPixel.x())),
                       static_cast<int>(std::lround(m_fingerPixel.y())));
-            m_basePixel = jitteredCenter(m_humanizer, centerPx,
-                                         m_radius * std::min(m_screenWidth, m_screenHeight),
-                                         m_screenWidth, m_screenHeight);
-            m_fingerPixel = m_basePixel;
-            emitTouch(send, static_cast<int>(proto::TouchAction::Down),
-                      static_cast<int>(std::lround(m_basePixel.x())),
-                      static_cast<int>(std::lround(m_basePixel.y())));
-            continue;
+            m_recentering = true;
+            m_recenterDelayMs = kRecenterGapMs;
+            m_pendingX = remainingX;
+            m_pendingY = remainingY;
+            break;
         }
 
         m_fingerPixel += QPointF(stepX, stepY);

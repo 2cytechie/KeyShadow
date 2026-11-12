@@ -1316,6 +1316,7 @@ void ConsolePage::sendPointerTouch(int action, const QPoint &widgetPos, bool cla
     }
     const qint32 actionButton = up ? proto::ButtonNone : proto::ButtonPrimary;
     const qint32 buttons = up ? proto::ButtonNone : proto::ButtonPrimary;
+    // pointer 10 专用直操触点：键位引擎分配范围为 2..9，互不重叠。
     m_session->sendControlMessage(proto::touch(touchAction, 10, device.x(), device.y(),
                                                size.width(), size.height(), 1.0f, actionButton,
                                                buttons));
@@ -1904,9 +1905,9 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
             } else if (mouseEvent->button() == Qt::MiddleButton) {
                 vk = 0x04;
             } else if (mouseEvent->button() == Qt::BackButton) {
-                vk = 0x06; // VK_XBUTTON1
+                vk = 0x05; // VK_XBUTTON1（上方侧键）
             } else if (mouseEvent->button() == Qt::ForwardButton) {
-                vk = 0x07; // VK_XBUTTON2
+                vk = 0x06; // VK_XBUTTON2（下方侧键）
             }
             if (vk && selectedBinding() >= 0) {
                 m_keymapProfile.bindings[m_keymapSelected].vk = vk;

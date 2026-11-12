@@ -424,9 +424,9 @@ bool SettingsPage::eventFilter(QObject *watched, QEvent *event) {
         } else if (mouseEvent->button() == Qt::MiddleButton) {
             vk = 0x04;
         } else if (mouseEvent->button() == Qt::BackButton) {
-            vk = 0x06;
+            vk = 0x05; // VK_XBUTTON1（上方侧键）
         } else if (mouseEvent->button() == Qt::ForwardButton) {
-            vk = 0x07;
+            vk = 0x06; // VK_XBUTTON2（下方侧键）
         }
         if (vk) {
             handleListenCandidate(vk);
