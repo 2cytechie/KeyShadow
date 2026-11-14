@@ -908,6 +908,11 @@ void ConsolePage::refreshQualityAvailability() {
     }
 }
 
+void ConsolePage::onLicenseChanged() {
+    refreshProfileToUi();
+    refreshQualityAvailability();
+}
+
 void ConsolePage::refreshQualityToUi() {
     const Profile &profile = m_session->profile();
     m_updatingQuality = true;

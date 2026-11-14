@@ -11,3 +11,6 @@ resources/scrcpy-server.jar
 
 .screenshots/
 .trae/
+
+# 激活码签发工具
+tools/license-issuer/

@@ -3,6 +3,7 @@
 #include "app/Session.h"
 #include "license/LicenseManager.h"
 #include "ui/KeyNames.h"
+#include "ui/LicenseDialog.h"
 #include "ui/Theme.h"
 
 #include <QApplication>
@@ -12,7 +13,6 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
-#include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMessageBox>
@@ -193,9 +193,11 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
 
     auto *fingerprint = new QLabel(LicenseManager::instance().machineFingerprint(), aboutSection);
     fingerprint->setFont(Theme::monoFont(12));
+    fingerprint->setWordWrap(true);
+    fingerprint->setTextInteractionFlags(Qt::TextSelectableByMouse);
     addRow(aboutSection, QStringLiteral("本机指纹"), fingerprint);
 
-    auto *activateButton = new QPushButton(QStringLiteral("激活 Pro"), aboutSection);
+    auto *activateButton = new QPushButton(QStringLiteral("激活 / 导入许可证"), aboutSection);
     addRow(aboutSection, QString(), activateButton);
     layout->addWidget(aboutSection);
 
@@ -263,23 +265,17 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
         emit statsOverlayChanged(checked);
     });
     connect(activateButton, &QPushButton::clicked, this, [this] {
-        bool ok = false;
-        const QString code = QInputDialog::getText(
-            this, QStringLiteral("激活 键影 Pro"), QStringLiteral("激活码（KS-XXXX-XXXX-XXXX）"),
-            QLineEdit::Normal, QString(), &ok);
-        if (!ok) {
-            return;
-        }
-        QString error;
-        if (!LicenseManager::instance().activate(code, &error)) {
-            QMessageBox::warning(this, QStringLiteral("激活失败"), error);
-            return;
-        }
+        LicenseDialog dialog(this);
+        connect(&dialog, &LicenseDialog::licenseChanged, this, [this] {
+            syncFromProfile();
+            if (m_session) {
+                // 激活后按新授权重算注入侧的拟人化/帧率门控，无需用户再操作。
+                m_session->applyProfile(m_session->profile(), false);
+            }
+            emit licenseChanged();
+        });
+        dialog.exec();
         syncFromProfile();
-        if (m_session) {
-            // 激活后按新授权重算注入侧的拟人化开关，无需用户再操作。
-            m_session->applyProfile(m_session->profile(), false);
-        }
     });
 
     QSettings settings;
@@ -532,8 +528,15 @@ void SettingsPage::syncFromProfile() {
                            : pro ? QStringLiteral("已关闭：可手动开启触控抖动与随机时序")
                                  : QStringLiteral("基础版不可用，激活 Pro 后可开启"));
     }
-    m_licenseLabel->setText(pro ? QStringLiteral("PRO · 永久有效")
-                                : QStringLiteral("基础版 · 功能不受限时可正常游玩"));
+    QString licenseText = QStringLiteral("基础版 · 功能不受限时可正常游玩");
+    if (pro) {
+        licenseText = QStringLiteral("PRO · 永久有效");
+        const QString licenseId = LicenseManager::instance().licenseId();
+        if (!licenseId.isEmpty()) {
+            licenseText += QStringLiteral(" · %1").arg(licenseId);
+        }
+    }
+    m_licenseLabel->setText(licenseText);
     m_licenseLabel->setProperty("state", pro ? "success" : "secondary");
     m_licenseLabel->style()->unpolish(m_licenseLabel);
     m_licenseLabel->style()->polish(m_licenseLabel);

@@ -29,6 +29,8 @@ signals:
     void statsOverlayChanged(bool enabled);
     void sprintKeyChanged(int vk);
     void sprintModeChanged(const QString &mode);
+    /// 授权状态变化（激活成功/移除本机授权）。
+    void licenseChanged();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;

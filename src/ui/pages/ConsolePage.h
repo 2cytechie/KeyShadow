@@ -61,6 +61,8 @@ public:
     void setStatsOverlayEnabled(bool enabled);
     /// 疾跑状态变化（Session 主线程拦截疾跑键后转发）：游戏态 HUD 提示。
     void onSprintToggled(bool active);
+    /// 授权状态变化：立即刷新画面增强可用性与帧率选项。
+    void onLicenseChanged();
 
 signals:
     void requestExitGameMode();

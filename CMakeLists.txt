@@ -60,6 +60,7 @@ set(KEYSHADOW_CORE_SOURCES
     src/core/input/InjectionThread.cpp
     src/core/engine/Engines.cpp
     src/core/profile/ProfileStore.cpp
+    src/license/LicenseVerifier.cpp
 )
 
 set(KEYSHADOW_CORE_HEADERS
@@ -74,6 +75,8 @@ set(KEYSHADOW_CORE_HEADERS
     src/core/input/InjectionThread.h
     src/core/engine/Engines.h
     src/core/profile/ProfileStore.h
+    src/license/LicenseVerifier.h
+    src/license/LicensePublicKey.h
 )
 
 add_library(keyshadow_core STATIC ${KEYSHADOW_CORE_SOURCES} ${KEYSHADOW_CORE_HEADERS})
@@ -83,7 +86,7 @@ target_include_directories(keyshadow_core PUBLIC src)
 target_link_libraries(keyshadow_core PUBLIC
     Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGLWidgets Qt6::Network Qt6::Concurrent
     FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale FFmpeg::swresample
-    ws2_32 winmm ole32 uuid dwmapi shcore d3d11 dxgi
+    ws2_32 winmm ole32 uuid dwmapi shcore d3d11 dxgi bcrypt
 )
 
 target_compile_definitions(keyshadow_core PUBLIC
@@ -107,6 +110,7 @@ set(KEYSHADOW_UI_SOURCES
     src/ui/KeymapOverlay.cpp
     src/ui/TabStrip.cpp
     src/ui/MainWindow.cpp
+    src/ui/LicenseDialog.cpp
     src/ui/pages/DevicePage.cpp
     src/ui/pages/ConsolePage.cpp
     src/ui/pages/SettingsPage.cpp
@@ -122,6 +126,7 @@ set(KEYSHADOW_UI_HEADERS
     src/ui/KeymapOverlay.h
     src/ui/TabStrip.h
     src/ui/MainWindow.h
+    src/ui/LicenseDialog.h
     src/ui/pages/DevicePage.h
     src/ui/pages/ConsolePage.h
     src/ui/pages/SettingsPage.h

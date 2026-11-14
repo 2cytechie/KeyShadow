@@ -43,6 +43,8 @@ private:
     void buildPages(QWidget *body, QHBoxLayout *layout);
     void navigateTo(int index);
     void showToast(const QString &text);
+    /// 按当前授权状态刷新侧边栏徽标。
+    void refreshLicenseBadge();
     /// 全屏游戏模式：把系统光标限制在窗口内，避免移动到其他屏幕。
     void updateCursorClip();
     void releaseCursorClip();

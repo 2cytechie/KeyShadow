@@ -21,6 +21,7 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QStyle>
 #include <QScreen>
 #include <QSettings>
 #include <QShowEvent>
@@ -197,16 +198,25 @@ void MainWindow::buildSidebar(QWidget *body, QHBoxLayout *layout) {
     column->addWidget(version);
 
     m_licenseBadge = new QLabel(m_sidebar);
-    const bool pro = LicenseManager::instance().isPro();
-    m_licenseBadge->setText(pro ? QStringLiteral("PRO") : QStringLiteral("基础版"));
-    m_licenseBadge->setProperty("badge", pro ? "pro" : "basic");
     m_licenseBadge->setMaximumWidth(64);
     column->addWidget(m_licenseBadge);
+    refreshLicenseBadge();
 
     connect(m_navGroup, QOverload<int>::of(&QButtonGroup::idClicked), this,
             [this](int id) { navigateTo(id); });
 
     layout->addWidget(m_sidebar);
+}
+
+void MainWindow::refreshLicenseBadge() {
+    if (!m_licenseBadge) {
+        return;
+    }
+    const bool pro = LicenseManager::instance().isPro();
+    m_licenseBadge->setText(pro ? QStringLiteral("PRO") : QStringLiteral("基础版"));
+    m_licenseBadge->setProperty("badge", pro ? "pro" : "basic");
+    m_licenseBadge->style()->unpolish(m_licenseBadge);
+    m_licenseBadge->style()->polish(m_licenseBadge);
 }
 
 void MainWindow::buildPages(QWidget *body, QHBoxLayout *layout) {
@@ -245,6 +255,11 @@ void MainWindow::buildPages(QWidget *body, QHBoxLayout *layout) {
     });
     connect(settingsPage, &SettingsPage::sprintModeChanged, m_session, &Session::setSprintMode);
     connect(m_session, &Session::sprintToggled, m_console, &ConsolePage::onSprintToggled);
+    connect(settingsPage, &SettingsPage::licenseChanged, this, [this] {
+        refreshLicenseBadge();
+        m_console->onLicenseChanged();
+        m_session->applyProfile(m_session->profile(), false);
+    });
 
     m_console->setSummonKey(m_session->summonKey());
 

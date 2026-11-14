@@ -13,6 +13,7 @@
 #include "core/engine/Engines.h"
 #include "core/profile/ProfileStore.h"
 #include "core/scrcpy/Protocol.h"
+#include "license/LicenseVerifier.h"
 
 namespace {
 
@@ -304,6 +305,115 @@ void testLookRecenterTiming() {
 void testMouseButtonVk() {
     check(ks::mouseButtonVk(3) == 0x05, "mouse button 3 maps to VK_XBUTTON1");
     check(ks::mouseButtonVk(4) == 0x06, "mouse button 4 maps to VK_XBUTTON2");
+}
+
+// ---------------------------------------------------------------------------
+// 许可证验签：测试专用 RSA-2048 密钥（不用于生产签发）
+// ---------------------------------------------------------------------------
+constexpr const char *kTestModulusB64 = "z5a21U3wEZb4xJTZFfdchKPNIwxQIRX1dyUxBb4_uQFV3rh43mBVZGxXrxN5cBrPUF8DAB6_cPXOsdZn3rDr97QSQ_D7Jqipx7C7AQky212-b6HL76r5FcjZe3xYuinhpJRnUC6Z4PWt01Pos5QBypIS5NpgIb-Qauobw6C56J9sFoHNVYFcYubKfrNy5LJD5dO1K5ZpKRWIbCFrSmeHLQdYZYDT2zWEI9xihe3lwJb_p4TIFaFI-gb983lSLWH4EZRtAlZirMDNWqD8dgFf3YF1uK3uahaIQjT0hBOBr91wjeLihwlxoYkYdkE5ESbc3yxSYq5ntG8i71mo53VIlQ";
+constexpr const char *kTestExponentB64 = "AQAB";
+constexpr const char *kTestFingerprint = "9F3A2C1B4D5E6F708192A3B4C5D6E7F8";
+constexpr const char *kTestPayloadOk = "eyJlZGl0aW9uIjoicHJvIiwiZXhwIjowLCJmZWF0dXJlcyI6WyJlbmhhbmNlIiwiZnBzMTIwIl0sImZwIjoiOUYzQTJDMUI0RDVFNkY3MDgxOTJBM0I0QzVENkU3RjgiLCJpYXQiOjE3MDAwMDAwMDAsImxpZCI6IkxJQy1URVNULTAwMDEiLCJub25jZSI6ImFiY2QxMjM0IiwidiI6MX0";
+constexpr const char *kTestSigOk = "m8GBBZuhFLMkyttB23bt7zW2VctkS8Eckce4BgJKshx78Boc-7JqfTQ815h9ZqIke7BHa-gBC_jpNiQPQxXbSpicbvtywy6a-tVVEVDstuZSAxU5JJSumcq3OG3LUDUCxsXKYDURBv4Xav4UKc4-FAq0hRpSMMvIWc2b0azua_LbTywUwQFPmqvDR_rF4S6mC932JsziF_GQ5x8elC0l0Chzg9F0puV5zKq3EniKIrzl-LDY95xgjqL7U2KVMuA2Ji6TB_furAqYTo3dSNM4E5K1-SMHPUTNq4on-Gewm4E50w3zuqIa0_grqU9JtUbrN6onQ5P4GLDTh0ApZujHvw";
+constexpr const char *kTestPayloadExpired = "eyJlZGl0aW9uIjoicHJvIiwiZXhwIjoxNzAwMDAwMDAwLCJmZWF0dXJlcyI6WyJlbmhhbmNlIiwiZnBzMTIwIl0sImZwIjoiOUYzQTJDMUI0RDVFNkY3MDgxOTJBM0I0QzVENkU3RjgiLCJpYXQiOjE3MDAwMDAwMDAsImxpZCI6IkxJQy1URVNULUVYUElSRUQiLCJub25jZSI6ImFiY2QxMjM0IiwidiI6MX0";
+constexpr const char *kTestSigExpired = "DPwSZ5KK1VM9-6Ua2s9zOzW1wRSkVN36_Ev7hL7thF4AlSEekcTR-VKE_8Kb7nj2AbkCGUA6zPKsN-RJ9Sl9ryztsHeQpyUzxgoIdXPuqDl_h1xZHKK-bG7hrz3e-G5zicGC5RnNCSgSsXl4ty8rRPi4bCujhHhXK9eCo63vTTCEqlF1bHdTNSylS6Xu5Q4P9bk_H20JTLuxJWAYU_QcmXSljUYhcGklw_ORk_sJoFCzT9I5vEoMmJtIZCm4QcJpgmz7K8bdC9Z6zY6y8wn_vvsnQlfWTUZizGSqLGZ1NQTsDTuUvfrBVJeYq8esLlP06Z6PPAHQiYux7CcIpVSZ3A";
+constexpr const char *kTestPayloadVersion2 = "eyJlZGl0aW9uIjoicHJvIiwiZXhwIjowLCJmZWF0dXJlcyI6WyJlbmhhbmNlIiwiZnBzMTIwIl0sImZwIjoiOUYzQTJDMUI0RDVFNkY3MDgxOTJBM0I0QzVENkU3RjgiLCJpYXQiOjE3MDAwMDAwMDAsImxpZCI6IkxJQy1URVNULVYyIiwibm9uY2UiOiJhYmNkMTIzNCIsInYiOjJ9";
+constexpr const char *kTestSigVersion2 = "K_zWbXfUMsqkB6l0KNGOsNYZG01bAHTIOa04vkonISSLe83L50YAN_5KldeXU-nzkaiuQYvtZeKHPDOR4n67eCb3QTwf45B_GkspkEfEOl9TkHZRuameHefd7R0cMJw9bdrNmFanINjPvbqDDT0ttpvhXcDTrvxebjezQyOAe2cWsPI7dbGC5zpc8SKtc3uR0doU77dVCM2bS-Rl6v3V0va8-jWIiGfFCID87T3gsKZX6t9IxpeZHz65sI5Z_EsmpuQImmo5umqbHfSGpAyiplINIuSsYLJHlq9Voxw01n6T8d-gBGNN9f1dRdNdkrfIcpkZ8pB4vSn9UDal1-Xaew";
+
+QByteArray testLicenseJson(const char *payload, const char *sig) {
+    QByteArray json = R"({"payload":")";
+    json += payload;
+    json += R"(","sig":")";
+    json += sig;
+    json += R"("})";
+    return json;
+}
+
+// 用 tools/license-issuer 的生产私钥签发，验证「工具私钥 ↔ 客户端内置公钥」一致。
+constexpr const char *kBuiltinLicenseJson =
+    R"({"payload":"eyJlZGl0aW9uIjoicHJvIiwiZXhwIjowLCJmZWF0dXJlcyI6WyJlbmhhbmNlIiwic2NyZWVuT2ZmIiwicHJlc2V0cyIsImZwczEyMCIsIndpcmVsZXNzIiwicmVjb3JkIl0sImZwIjoiMTExMTIyMjIzMzMzNDQ0NDU1NTU2NjY2Nzc3Nzg4ODgiLCJpYXQiOjE3OTQ2NzAxNzcsImxpZCI6IkxJQy1CVUlMVElOLVRFU1QiLCJub25jZSI6ImI5YTRkMDI4IiwidiI6MX0","sig":"ilBlNeJfJJr6zG9h3mpAEg0lFEKjVWj55HTy55Q3XiLBGBFapNp-a8Al1lcSeSASWyHPkj-DWTwqtJ4cYSkoZyTJ1-YFoaunCpI4F2fRo70kE5MSMx_AjRPOjeCeu6oXnCruA5u7frLMFe78vLqdULxoxPNg0311xpd1ei8DUH7AN_O9Y1ZYZG0uOso9A_IAeavdfyi0s-oFe6iMKHadw6DXQgpp7YWFAoR0TolBgsOxIr2Lls47NOYg57a7huKKvpktd6xP13bo_N5gISK8L0Tw0PZx0d9REkto7iye3C0T-vxMn4ymaN4TXkTuuZjth-HknNoJxYf4YNr_pMjicg"})";
+
+void testLicenseVerifier() {
+    const QByteArray modulus = ks::LicenseVerifier::base64UrlDecode(kTestModulusB64);
+    const QByteArray exponent = ks::LicenseVerifier::base64UrlDecode(kTestExponentB64);
+    const QString fingerprint = QString::fromLatin1(kTestFingerprint);
+    const qint64 now = 1800000000; // 晚于 iat、早于无
+
+    auto verify = [&](const QByteArray &json, const QString &fp, qint64 lastSeen = 0) {
+        return ks::LicenseVerifier::verifyWithKey(json, fp, now, lastSeen, modulus, exponent);
+    };
+
+    const ks::LicenseCheck ok = verify(testLicenseJson(kTestPayloadOk, kTestSigOk), fingerprint);
+    check(ok.ok(), "license: valid file accepted");
+    check(ok.payload.licenseId == QStringLiteral("LIC-TEST-0001"), "license: license id parsed");
+    check(ok.payload.features.size() == 2, "license: features parsed");
+    check(ok.payload.expiresAt == 0, "license: permanent license");
+
+    // 篡改 payload（改一个字符）
+    QByteArray tamperedPayload = QByteArray(kTestPayloadOk);
+    tamperedPayload[10] = tamperedPayload.at(10) == 'A' ? 'B' : 'A';
+    check(verify(testLicenseJson(tamperedPayload.constData(), kTestSigOk), fingerprint).error ==
+              ks::LicenseError::BadSignature,
+          "license: tampered payload rejected");
+
+    // 篡改签名
+    QByteArray tamperedSig = QByteArray(kTestSigOk);
+    tamperedSig[5] = tamperedSig.at(5) == 'A' ? 'B' : 'A';
+    check(verify(testLicenseJson(kTestPayloadOk, tamperedSig.constData()), fingerprint).error ==
+              ks::LicenseError::BadSignature,
+          "license: tampered signature rejected");
+
+    // 指纹不匹配
+    check(verify(testLicenseJson(kTestPayloadOk, kTestSigOk),
+                 QStringLiteral("00000000000000000000000000000000"))
+                  .error == ks::LicenseError::FingerprintMismatch,
+          "license: other machine rejected");
+
+    // 指纹归一化：带分隔符也能匹配
+    check(verify(testLicenseJson(kTestPayloadOk, kTestSigOk),
+                 QStringLiteral("9f3a-2c1b-4d5e-6f70-8192-a3b4-c5d6-e7f8"))
+              .ok(),
+          "license: fingerprint separators tolerated");
+
+    // 过期
+    check(verify(testLicenseJson(kTestPayloadExpired, kTestSigExpired), fingerprint).error ==
+              ks::LicenseError::Expired,
+          "license: expired rejected");
+
+    // 未知版本
+    check(verify(testLicenseJson(kTestPayloadVersion2, kTestSigVersion2), fingerprint).error ==
+              ks::LicenseError::UnsupportedVersion,
+          "license: unsupported version rejected");
+
+    // 结构错误
+    check(verify(QByteArray("not json"), fingerprint).error == ks::LicenseError::Malformed,
+          "license: non-json rejected");
+    check(verify(QByteArray(R"({"payload":"abc"})"), fingerprint).error ==
+              ks::LicenseError::Malformed,
+          "license: missing signature rejected");
+    check(verify(QByteArray(), fingerprint).error == ks::LicenseError::FileMissing,
+          "license: empty content reports missing");
+
+    // 时钟回拨：系统时间比上次可信时间倒退超过 24h
+    check(verify(testLicenseJson(kTestPayloadOk, kTestSigOk), fingerprint,
+                 now + 2 * 24 * 60 * 60)
+                  .error == ks::LicenseError::ClockRollback,
+          "license: clock rollback rejected");
+    check(verify(testLicenseJson(kTestPayloadOk, kTestSigOk), fingerprint, now - 60).ok(),
+          "license: small clock skew tolerated");
+
+    // base64url 往返
+    const QByteArray raw = QByteArray::fromHex("00fbff1020304050");
+    QByteArray encoded = raw.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    check(ks::LicenseVerifier::base64UrlDecode(encoded) == raw, "license: base64url roundtrip");
+
+    // 内置公钥与发码工具私钥必须匹配（否则正式签发的许可证全部无法验证）
+    const ks::LicenseCheck builtin =
+        ks::LicenseVerifier::verify(QByteArray(kBuiltinLicenseJson),
+                                    QStringLiteral("11112222333344445555666677778888"), 1900000000, 0);
+    check(builtin.ok(), "license: builtin public key matches issuer");
+    check(builtin.payload.licenseId == QStringLiteral("LIC-BUILTIN-TEST"),
+          "license: builtin license id parsed");
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +843,7 @@ int main(int argc, char *argv[]) {
     testDirectTouchFilter();
     testRegionJitter();
     testCalibrator();
+    testLicenseVerifier();
     testProfileStore();
     testDefaultProfile();
 
