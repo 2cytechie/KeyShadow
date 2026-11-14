@@ -236,9 +236,9 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
         return combo;
     };
 
-    m_resolutionCombo = makeCombo({QStringLiteral("原生"), QStringLiteral("1080p"),
+    m_resolutionCombo = makeCombo({QStringLiteral("原生 · PRO"), QStringLiteral("1080p"),
                                    QStringLiteral("720p"), QStringLiteral("480p")},
-                                  0);
+                                  1);
     m_fpsCombo = makeCombo({QStringLiteral("30 fps"), QStringLiteral("60 fps"),
                             QStringLiteral("90 fps · PRO"), QStringLiteral("120 fps · PRO")},
                            1);
@@ -299,7 +299,20 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
     });
 
     connect(m_resolutionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            [this](int) { applyVideoOptions(); });
+            [this](int index) {
+                // 原生分辨率为付费功能：未激活时回退到方案当前值（不改动方案）。
+                if (index == 0 && !LicenseManager::instance().isPro()) {
+                    showHud(QStringLiteral("原生分辨率为付费功能，激活后解锁"));
+                    const int maxSize = m_session->profile().maxSize;
+                    QSignalBlocker blocker(m_resolutionCombo);
+                    m_resolutionCombo->setCurrentIndex(maxSize >= 1080   ? 1
+                                                       : maxSize >= 720 ? 2
+                                                       : maxSize >= 480 ? 3
+                                                                        : 1);
+                    return;
+                }
+                applyVideoOptions();
+            });
     connect(m_fpsCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int index) {
                 if (index >= 2 && !LicenseManager::instance().isPro()) {
@@ -853,10 +866,14 @@ void ConsolePage::refreshProfileToUi() {
     QSignalBlocker blockFps(m_fpsCombo);
     QSignalBlocker blockBitrate(m_bitrateCombo);
 
-    m_resolutionCombo->setCurrentIndex(profile.maxSize >= 1080 ? 1
-                                   : profile.maxSize >= 720 ? 2
-                                   : profile.maxSize >= 480 ? 3
-                                                            : 0);
+    int resolutionIndex = profile.maxSize >= 1080 ? 1
+                        : profile.maxSize >= 720 ? 2
+                        : profile.maxSize >= 480 ? 3
+                                                 : 0;
+    if (resolutionIndex == 0 && !LicenseManager::instance().isPro()) {
+        resolutionIndex = 1; // 原生分辨率为付费功能
+    }
+    m_resolutionCombo->setCurrentIndex(resolutionIndex);
     m_fpsCombo->setCurrentIndex(profile.maxFps >= 120 ? 3
                               : profile.maxFps >= 90 ? 2
                               : profile.maxFps >= 60 ? 1

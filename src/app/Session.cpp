@@ -354,9 +354,14 @@ void Session::reloadProfiles() {
 
 void Session::applyProfile(const Profile &profile, bool persist) {
     m_profile = profile;
-    if (!LicenseManager::instance().isPro() && m_profile.maxFps > 60) {
-        // 90/120fps 为付费功能：未激活时统一钳制到 60（导入方案/旧文件兜底）。
-        m_profile.maxFps = 60;
+    if (!LicenseManager::instance().isPro()) {
+        // 90/120fps 与原生分辨率为付费功能：未激活时统一钳制（导入方案/旧文件兜底）。
+        if (m_profile.maxFps > 60) {
+            m_profile.maxFps = 60;
+        }
+        if (m_profile.maxSize == 0) {
+            m_profile.maxSize = 1080;
+        }
     }
     if (m_globalSettingsLoaded) {
         // 音频、息屏和拟人化是全局设置，不随键位方案切换。
