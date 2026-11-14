@@ -192,6 +192,8 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
                 });
         connect(m_session, &Session::profileChanged, this,
                 [this](const Profile &) { refreshProfileToUi(); });
+        connect(m_session, &Session::screenOffChanged, this,
+                [this](bool) { refreshScreenOffButton(); });
     }
 
     m_keymapProfile = m_session->profile();
@@ -200,6 +202,7 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
     refreshKeymapSummary();
     refreshKeymapProperties();
     updateSummonText();
+    refreshScreenOffButton();
     setKeymapEditUi(false);
 }
 
@@ -258,19 +261,28 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
     m_latencyLabel = makeMonoLabel(m_toolbar, QStringLiteral("-- ms"), 7);
     layout->addWidget(m_latencyLabel);
 
-    m_toolbarFullscreenButton = new QPushButton(m_toolbar);
-    m_toolbarFullscreenButton->setIcon(
-        IconFactory::icon(QStringLiteral("maximize"), Theme::textSecondary()));
-    m_toolbarFullscreenButton->setProperty("variant", "ghost");
-    m_toolbarFullscreenButton->setToolTip(QStringLiteral("全屏游戏模式（F11）"));
-    m_toolbarFullscreenButton->setFixedSize(32, 28);
-    layout->addWidget(m_toolbarFullscreenButton);
-    connect(m_toolbarFullscreenButton, &QPushButton::clicked, this, [this] {
-        if (m_mode == InputMode::Edit) {
-            showHud(QStringLiteral("请先退出键位编辑再进入全屏"));
+    m_screenOffButton = new QToolButton(m_toolbar);
+    m_screenOffButton->setObjectName(QStringLiteral("ScreenOffButton"));
+    m_screenOffButton->setIcon(
+        IconFactory::icon(QStringLiteral("screen-off"), Theme::textSecondary(), 16));
+    m_screenOffButton->setIconSize(QSize(16, 16));
+    m_screenOffButton->setFixedSize(28, 28);
+    m_screenOffButton->setCheckable(true);
+    m_screenOffButton->setToolTip(QStringLiteral("息屏投屏：关闭手机屏幕，画面只在电脑显示"));
+    m_screenOffButton->setCursor(Qt::PointingHandCursor);
+    layout->addWidget(m_screenOffButton);
+    connect(m_screenOffButton, &QToolButton::clicked, this, [this](bool checked) {
+        if (!m_session) {
             return;
         }
-        emit toggleGameMode();
+        if (checked && !LicenseManager::instance().isPro()) {
+            QSignalBlocker blocker(m_screenOffButton);
+            m_screenOffButton->setChecked(false);
+            showHud(QStringLiteral("息屏投屏为付费功能，激活后解锁"));
+            return;
+        }
+        m_session->setScreenOff(checked);
+        showHud(checked ? QStringLiteral("已开启息屏投屏") : QStringLiteral("已关闭息屏投屏"));
     });
 
     // 鼠标模式切换：入工具栏，不再悬浮画布（避免挡住键位）。
@@ -293,6 +305,21 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
         } else if (m_mode == InputMode::Pointer) {
             setInputMode(InputMode::Mapping);
         }
+    });
+
+    m_toolbarFullscreenButton = new QPushButton(m_toolbar);
+    m_toolbarFullscreenButton->setIcon(
+        IconFactory::icon(QStringLiteral("maximize"), Theme::textSecondary()));
+    m_toolbarFullscreenButton->setProperty("variant", "ghost");
+    m_toolbarFullscreenButton->setToolTip(QStringLiteral("全屏游戏模式（F11）"));
+    m_toolbarFullscreenButton->setFixedSize(32, 28);
+    layout->addWidget(m_toolbarFullscreenButton);
+    connect(m_toolbarFullscreenButton, &QPushButton::clicked, this, [this] {
+        if (m_mode == InputMode::Edit) {
+            showHud(QStringLiteral("请先退出键位编辑再进入全屏"));
+            return;
+        }
+        emit toggleGameMode();
     });
 
     connect(m_resolutionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
@@ -915,6 +942,14 @@ void ConsolePage::refreshQualityAvailability() {
     if (m_qualityLockHint) {
         m_qualityLockHint->setVisible(!pro);
     }
+}
+
+void ConsolePage::refreshScreenOffButton() {
+    if (!m_screenOffButton || !m_session) {
+        return;
+    }
+    QSignalBlocker blocker(m_screenOffButton);
+    m_screenOffButton->setChecked(m_session->screenOff());
 }
 
 void ConsolePage::onLicenseChanged() {

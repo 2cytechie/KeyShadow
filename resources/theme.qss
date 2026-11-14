@@ -296,11 +296,13 @@ QWidget#FloatingButtons {
     border-radius: 6px;
 }
 
-QToolButton#MouseModeButton:hover {
+QToolButton#MouseModeButton:hover,
+QToolButton#ScreenOffButton:hover {
     background: #222833;
 }
 
-QToolButton#MouseModeButton:checked {
+QToolButton#MouseModeButton:checked,
+QToolButton#ScreenOffButton:checked {
     background: rgba(0, 217, 184, 0.20);
     border: 1px solid #00D9B8;
 }

@@ -515,6 +515,7 @@ void Session::setScreenOff(bool off) {
     if (off) {
         emit logMessage(QStringLiteral("已开启息屏投屏"));
     }
+    emit screenOffChanged(off);
 }
 
 void Session::setAudioEnabled(bool enabled) {

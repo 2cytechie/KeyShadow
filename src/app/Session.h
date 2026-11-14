@@ -112,6 +112,7 @@ signals:
     void profileChanged(ks::Profile profile);
     void summonKeyPressed(bool down);
     void sprintToggled(bool active);
+    void screenOffChanged(bool off);
 
 private:
     void setState(State state, const QString &message);

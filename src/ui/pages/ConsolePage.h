@@ -92,6 +92,7 @@ private:
     void refreshProfileToUi();
     void refreshQualityToUi();
     void refreshQualityAvailability();
+    void refreshScreenOffButton();
     void updateStatsUi();
     void applyVideoOptions();
     void resetQuality();
@@ -153,6 +154,7 @@ private:
     QComboBox *m_fpsCombo = nullptr;
     QComboBox *m_bitrateCombo = nullptr;
     QToolButton *m_mouseButton = nullptr;
+    QToolButton *m_screenOffButton = nullptr;
     QPushButton *m_toolbarFullscreenButton = nullptr;
 
     // 视频区

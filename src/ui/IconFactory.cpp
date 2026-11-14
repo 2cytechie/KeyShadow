@@ -116,6 +116,13 @@ void drawGlyph(QPainter &painter, const QString &name, const QRectF &r) {
                             w * 0.20, w * 0.20);
         painter.drawPath(body);
         painter.drawLine(QPointF(c.x(), r.top() + h * 0.14), QPointF(c.x(), r.top() + h * 0.40));
+    } else if (name == QStringLiteral("screen-off")) {
+        QPainterPath body;
+        body.addRoundedRect(QRectF(r.left() + w * 0.26, r.top() + h * 0.10, w * 0.48, h * 0.80),
+                            w * 0.08, w * 0.08);
+        painter.drawPath(body);
+        painter.drawLine(QPointF(r.left() + w * 0.14, r.bottom() - h * 0.10),
+                         QPointF(r.right() - w * 0.14, r.top() + h * 0.10));
     } else if (name == QStringLiteral("close")) {
         painter.drawLine(QPointF(r.left() + w * 0.30, r.top() + h * 0.30),
                          QPointF(r.right() - w * 0.30, r.bottom() - h * 0.30));

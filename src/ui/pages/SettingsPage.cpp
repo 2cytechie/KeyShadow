@@ -282,6 +282,17 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
         QSettings().setValue(QStringLiteral("display/statsOverlay"), checked);
         emit statsOverlayChanged(checked);
     });
+    if (m_session) {
+        // 投屏页工具栏也有息屏开关：两处双向同步。
+        connect(m_session, &Session::screenOffChanged, this, [this](bool off) {
+            if (!m_screenOffCheck) {
+                return;
+            }
+            m_syncing = true;
+            m_screenOffCheck->setChecked(off);
+            m_syncing = false;
+        });
+    }
     connect(activateButton, &QPushButton::clicked, this, [this] {
         LicenseDialog dialog(this);
         connect(&dialog, &LicenseDialog::licenseChanged, this, [this] {
