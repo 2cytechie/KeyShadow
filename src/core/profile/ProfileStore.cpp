@@ -47,9 +47,8 @@ QJsonObject profileToJson(const Profile &profile) {
     enhance.insert(QStringLiteral("brightness"), profile.brightness);
     enhance.insert(QStringLiteral("contrast"), profile.contrast);
     enhance.insert(QStringLiteral("saturation"), profile.saturation);
-    enhance.insert(QStringLiteral("gamma"), profile.gamma);
-    enhance.insert(QStringLiteral("highlight"), profile.highlight);
-    enhance.insert(QStringLiteral("cas"), profile.casSharpness);
+    enhance.insert(QStringLiteral("shadow"), profile.shadow);
+    enhance.insert(QStringLiteral("sharpness"), profile.sharpness);
     obj.insert(QStringLiteral("enhance"), enhance);
 
     QJsonObject video;
@@ -99,9 +98,8 @@ Profile profileFromJson(const QJsonObject &obj) {
     profile.brightness = enhance.value(QStringLiteral("brightness")).toDouble(0.0);
     profile.contrast = enhance.value(QStringLiteral("contrast")).toDouble(0.0);
     profile.saturation = enhance.value(QStringLiteral("saturation")).toDouble(0.0);
-    profile.gamma = enhance.value(QStringLiteral("gamma")).toDouble(1.0);
-    profile.highlight = enhance.value(QStringLiteral("highlight")).toDouble(0.0);
-    profile.casSharpness = enhance.value(QStringLiteral("cas")).toDouble(0.0);
+    profile.shadow = enhance.value(QStringLiteral("shadow")).toDouble(0.0);
+    profile.sharpness = enhance.value(QStringLiteral("sharpness")).toDouble(0.0);
 
     const QJsonObject video = obj.value(QStringLiteral("video")).toObject();
     profile.videoBitRate = video.value(QStringLiteral("bitRate")).toInt(8000000);

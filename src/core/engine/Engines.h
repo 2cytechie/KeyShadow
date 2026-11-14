@@ -74,12 +74,11 @@ struct Profile {
     QVector<KeyBinding> bindings;
 
     // 画面增强（Pro）
-    double brightness = 0.0;
-    double contrast = 0.0;
-    double saturation = 0.0;
-    double gamma = 1.0;
-    double highlight = 0.0;
-    double casSharpness = 0.0;
+    double brightness = 0.0;  ///< -100..100
+    double contrast = 0.0;    ///< -100..100
+    double saturation = 0.0;  ///< -100..100
+    double shadow = 0.0;      ///< 0..100，暗部提亮
+    double sharpness = 0.0;   ///< 0..100
 
     // 视频参数
     int videoBitRate = 8000000;

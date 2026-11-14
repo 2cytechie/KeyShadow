@@ -56,9 +56,6 @@ QLabel *makeMonoLabel(QWidget *parent, const QString &text, int widthChars) {
 }
 
 QString formatQualityValue(const QString &key, int value, const QString &suffix) {
-    if (key == QStringLiteral("gamma")) {
-        return QString::number(value / 100.0, 'f', 2);
-    }
     if (key == QStringLiteral("brightness") || key == QStringLiteral("contrast") ||
         key == QStringLiteral("saturation")) {
         return value > 0 ? QStringLiteral("+%1").arg(value) : QString::number(value);
@@ -519,12 +516,10 @@ QWidget *ConsolePage::buildQualityTab() {
          static_cast<int>(profile.contrast), QString()},
         {QStringLiteral("saturation"), QStringLiteral("饱和度"), -100, 100,
          static_cast<int>(profile.saturation), QString()},
-        {QStringLiteral("gamma"), QStringLiteral("Gamma"), 50, 200,
-         static_cast<int>(profile.gamma * 100), QString()},
-        {QStringLiteral("highlight"), QStringLiteral("高光压缩"), 0, 200,
-         static_cast<int>(profile.highlight), QStringLiteral("%")},
-        {QStringLiteral("cas"), QStringLiteral("CAS 锐化"), 0, 100,
-         static_cast<int>(profile.casSharpness), QStringLiteral("%")},
+        {QStringLiteral("shadow"), QStringLiteral("阴影"), 0, 100,
+         static_cast<int>(profile.shadow), QStringLiteral("%")},
+        {QStringLiteral("sharpness"), QStringLiteral("锐化"), 0, 100,
+         static_cast<int>(profile.sharpness), QStringLiteral("%")},
     };
 
     for (const SliderSpec &spec : specs) {
@@ -568,12 +563,10 @@ QWidget *ConsolePage::buildQualityTab() {
                 updated.contrast = v;
             } else if (key == QStringLiteral("saturation")) {
                 updated.saturation = v;
-            } else if (key == QStringLiteral("gamma")) {
-                updated.gamma = v / 100.0;
-            } else if (key == QStringLiteral("highlight")) {
-                updated.highlight = v;
+            } else if (key == QStringLiteral("shadow")) {
+                updated.shadow = v;
             } else {
-                updated.casSharpness = v;
+                updated.sharpness = v;
             }
             m_session->applyProfile(updated, false);
         });
@@ -889,9 +882,8 @@ void ConsolePage::refreshProfileToUi() {
     params.brightness = static_cast<float>(profile.brightness);
     params.contrast = static_cast<float>(profile.contrast);
     params.saturation = static_cast<float>(profile.saturation);
-    params.gamma = static_cast<float>(profile.gamma);
-    params.highlight = static_cast<float>(profile.highlight);
-    params.casSharpness = static_cast<float>(profile.casSharpness);
+    params.shadow = static_cast<float>(profile.shadow);
+    params.sharpness = static_cast<float>(profile.sharpness);
     if (!LicenseManager::instance().isPro()) {
         // 未激活时不应用方案/导入文件里的增强参数，保持原始画面。
         params = VideoWidget::EnhanceParams{};
@@ -941,12 +933,10 @@ void ConsolePage::refreshQualityToUi() {
             value = static_cast<int>(profile.contrast);
         } else if (row.key == QStringLiteral("saturation")) {
             value = static_cast<int>(profile.saturation);
-        } else if (row.key == QStringLiteral("gamma")) {
-            value = static_cast<int>(profile.gamma * 100);
-        } else if (row.key == QStringLiteral("highlight")) {
-            value = static_cast<int>(profile.highlight);
+        } else if (row.key == QStringLiteral("shadow")) {
+            value = static_cast<int>(profile.shadow);
         } else {
-            value = static_cast<int>(profile.casSharpness);
+            value = static_cast<int>(profile.sharpness);
         }
         QSignalBlocker blocker(row.slider);
         row.slider->setValue(value);
@@ -967,9 +957,8 @@ void ConsolePage::resetQuality() {
     profile.brightness = 0;
     profile.contrast = 0;
     profile.saturation = 0;
-    profile.gamma = 1.0;
-    profile.highlight = 0;
-    profile.casSharpness = 0;
+    profile.shadow = 0;
+    profile.sharpness = 0;
     m_session->applyProfile(profile, true);
     refreshQualityToUi();
     showHud(QStringLiteral("画面增强已重置"));

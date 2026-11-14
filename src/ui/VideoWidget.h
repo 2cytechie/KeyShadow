@@ -21,9 +21,8 @@ public:
         float brightness = 0.0f;  ///< -100..100
         float contrast = 0.0f;    ///< -100..100
         float saturation = 0.0f;  ///< -100..100
-        float gamma = 1.0f;       ///< 0.5..2.0
-        float highlight = 0.0f;   ///< 0..200（高光压缩强度）
-        float casSharpness = 0.0f; ///< 0..100
+        float shadow = 0.0f;      ///< 0..100（暗部提亮）
+        float sharpness = 0.0f;   ///< 0..100
     };
 
     explicit VideoWidget(QWidget *parent = nullptr);

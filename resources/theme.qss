@@ -372,7 +372,7 @@ QSpinBox:focus, QDoubleSpinBox:focus {
 /* ------------------------------- 滑杆 ------------------------------- */
 QSlider::groove:horizontal {
     height: 4px;
-    background: #2A323E;
+    background: #0B0D10;
     border-radius: 2px;
 }
 

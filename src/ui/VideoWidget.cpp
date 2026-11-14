@@ -26,16 +26,17 @@ uniform sampler2D uTextureY;
 uniform sampler2D uTextureU;
 uniform sampler2D uTextureV;
 
-uniform float uBrightness;   // -1..1
+uniform float uBrightness;   // -0.2..0.2
 uniform float uContrast;     // 0..2
 uniform float uSaturation;   // 0..2
-uniform float uGamma;        // 0.5..2
-uniform float uHighlight;    // 0..2
-uniform float uCas;          // 0..1
+uniform float uShadow;       // 0..1（暗部提亮强度）
+uniform float uSharpness;    // 0..1
 uniform vec2  uTexel;
 
-float sampleY(vec2 uv) {
-    return texture(uTextureY, uv).r;
+/// 亮度通道采样：limited range → 近似 full range（0..1），保证锐化细节与 RGB 同量级。
+float lumaAt(vec2 uv) {
+    float y = texture(uTextureY, uv).r;
+    return clamp((y - 16.0 / 255.0) * 1.164383, 0.0, 1.0);
 }
 
 void main() {
@@ -50,23 +51,14 @@ void main() {
     color.g = y - 0.1873 * u - 0.4681 * v;
     color.b = y + 1.8556 * u;
 
-    // CAS 风格自适应锐化（基于亮度局部对比）
-    if (uCas > 0.001) {
-        float yc = sampleY(vUv);
-        float yl = sampleY(vUv - vec2(uTexel.x, 0.0));
-        float yr = sampleY(vUv + vec2(uTexel.x, 0.0));
-        float yt = sampleY(vUv + vec2(0.0, uTexel.y));
-        float yb = sampleY(vUv - vec2(0.0, uTexel.y));
-        float mn = min(min(yl, yr), min(yt, yb));
-        float mx = max(max(yl, yr), max(yt, yb));
-        float amp = clamp(min(mn, 1.0 - mx) / max(mx, 0.0001), 0.0, 1.0);
-        float w = uCas * sqrt(amp);
-        float avg = (yl + yr + yt + yb) * 0.25;
-        color += (yc - avg) * w;
+    // 锐化：4 邻域反锐化掩模（unsharp mask），强度 0..1 → 0..2.5 倍细节
+    if (uSharpness > 0.001) {
+        float center = lumaAt(vUv);
+        float blur = 0.25 * (lumaAt(vUv + vec2(uTexel.x, 0.0)) + lumaAt(vUv - vec2(uTexel.x, 0.0)) +
+                             lumaAt(vUv + vec2(0.0, uTexel.y)) + lumaAt(vUv - vec2(0.0, uTexel.y)));
+        float detail = clamp(center - blur, -0.2, 0.2);
+        color += detail * uSharpness * 2.5;
     }
-
-    // Gamma
-    color = pow(max(color, vec3(0.0)), vec3(1.0 / max(uGamma, 0.01)));
 
     // 对比度（围绕中灰）
     color = (color - 0.5) * uContrast + 0.5;
@@ -78,10 +70,11 @@ void main() {
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
     color = mix(vec3(luma), color, uSaturation);
 
-    // 高光压缩（soft-clip tone mapping）
-    if (uHighlight > 0.001) {
-        vec3 compressed = color * (1.0 + uHighlight) / (1.0 + uHighlight * max(color, vec3(0.0)));
-        color = mix(color, compressed, 1.0);
+    // 阴影：仅抬升暗部（越暗抬升越多，中间调以上不受影响）
+    if (uShadow > 0.001) {
+        float l = clamp(dot(color, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+        float mask = 1.0 - smoothstep(0.0, 0.6, l);
+        color += (vec3(1.0) - color) * (uShadow * 0.45 * mask);
     }
 
     fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
@@ -327,9 +320,8 @@ void VideoWidget::paintGL() {
     m_program->setUniformValue("uBrightness", bypass ? 0.0f : m_params.brightness / 500.0f);
     m_program->setUniformValue("uContrast", bypass ? 1.0f : 1.0f + m_params.contrast / 100.0f);
     m_program->setUniformValue("uSaturation", bypass ? 1.0f : 1.0f + m_params.saturation / 100.0f);
-    m_program->setUniformValue("uGamma", bypass ? 1.0f : std::max(0.2f, m_params.gamma));
-    m_program->setUniformValue("uHighlight", bypass ? 0.0f : m_params.highlight / 100.0f);
-    m_program->setUniformValue("uCas", bypass ? 0.0f : m_params.casSharpness / 100.0f);
+    m_program->setUniformValue("uShadow", bypass ? 0.0f : m_params.shadow / 100.0f);
+    m_program->setUniformValue("uSharpness", bypass ? 0.0f : m_params.sharpness / 100.0f);
     m_program->setUniformValue("uTexel", QVector2D(1.0f / frame->width, 1.0f / frame->height));
 
     for (int i = 0; i < 3; ++i) {
