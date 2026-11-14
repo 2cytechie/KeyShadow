@@ -51,7 +51,7 @@ DevicePage::DevicePage(Session *session, QWidget *parent) : QWidget(parent), m_s
     // 品牌行
     auto *brandRow = new QHBoxLayout();
     auto *mark = new QLabel(card);
-    mark->setPixmap(IconFactory::brandMark(Theme::brandPrimary(), 26));
+    mark->setPixmap(IconFactory::appIcon(26));
     auto *brand = new QLabel(QStringLiteral("键影 KeyShadow"), card);
     brand->setObjectName(QStringLiteral("BrandName"));
     auto *version = new QLabel(QStringLiteral("v0.1.0"), card);

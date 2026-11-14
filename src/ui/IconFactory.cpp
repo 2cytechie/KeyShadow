@@ -1,5 +1,6 @@
 #include "ui/IconFactory.h"
 
+#include <QApplication>
 #include <QPainter>
 #include <QPainterPath>
 
@@ -152,29 +153,11 @@ QIcon IconFactory::icon(const QString &name, const QColor &color, int size) {
     return QIcon(pixmap(name, color, size));
 }
 
-QPixmap IconFactory::brandMark(const QColor &color, int size) {
-    QPixmap pixmap(size, size);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-
-    QPen pen(color);
-    pen.setWidthF(1.6);
-    painter.setPen(pen);
-    painter.setBrush(Qt::NoBrush);
-
-    const double inset = size * 0.18;
-    QPainterPath diamond;
-    diamond.moveTo(size / 2.0, inset);
-    diamond.lineTo(size - inset, size / 2.0);
-    diamond.lineTo(size / 2.0, size - inset);
-    diamond.lineTo(inset, size / 2.0);
-    diamond.closeSubpath();
-    painter.drawPath(diamond);
-
-    painter.setBrush(color);
-    painter.drawEllipse(QPointF(size / 2.0, size / 2.0), size * 0.10, size * 0.10);
-    painter.end();
+QPixmap IconFactory::appIcon(int size) {
+    const qreal dpr = qApp->devicePixelRatio();
+    QIcon icon(QStringLiteral(":/icons/app-icon.svg"));
+    QPixmap pixmap = icon.pixmap(QSize(size, size), dpr);
+    pixmap.setDevicePixelRatio(dpr);
     return pixmap;
 }
 

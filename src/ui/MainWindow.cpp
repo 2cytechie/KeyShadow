@@ -132,7 +132,7 @@ void MainWindow::buildTitleBar(QWidget *root, QVBoxLayout *layout) {
     bar->setSpacing(8);
 
     auto *mark = new QLabel(m_titleBar);
-    mark->setPixmap(IconFactory::brandMark(Theme::brandPrimary(), 18));
+    mark->setPixmap(IconFactory::appIcon(18));
     auto *title = new QLabel(QStringLiteral("键影 KeyShadow"), m_titleBar);
     title->setObjectName(QStringLiteral("BrandName"));
     bar->addWidget(mark);

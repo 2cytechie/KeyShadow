@@ -141,8 +141,17 @@ qt_add_resources(KeyShadow "keyshadow_resources"
         resources/theme.qss
         resources/icons/check.svg
         resources/icons/check-disabled.svg
+        resources/icons/app-icon.svg
+        resources/icons/app-icon.ico
         resources/scrcpy-server.jar
 )
+
+# Windows 可执行文件图标（资源管理器、任务栏固定项）
+if(WIN32)
+    enable_language(RC)
+    configure_file(resources/keyshadow.rc.in "${CMAKE_CURRENT_BINARY_DIR}/keyshadow.rc" @ONLY)
+    target_sources(KeyShadow PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/keyshadow.rc")
+endif()
 
 # 将 FFmpeg 运行库复制到输出目录（与 exe 同级）
 add_custom_command(TARGET KeyShadow POST_BUILD

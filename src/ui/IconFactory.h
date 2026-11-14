@@ -13,8 +13,8 @@ public:
     static QIcon icon(const QString &name, const QColor &color, int size = 20);
     static QPixmap pixmap(const QString &name, const QColor &color, int size = 20);
 
-    /// 品牌标识（键影：菱形键帽）。
-    static QPixmap brandMark(const QColor &color, int size = 20);
+    /// 应用图标（键影：半影键帽）。
+    static QPixmap appIcon(int size = 20);
 };
 
 } // namespace ks::ui

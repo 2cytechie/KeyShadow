@@ -2,6 +2,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QIcon>
 #include <QStandardPaths>
 #include <QSurfaceFormat>
 #include <QTimer>
@@ -141,6 +142,7 @@ int main(int argc, char *argv[]) {
     QApplication::setApplicationName(QStringLiteral("KeyShadow"));
     QApplication::setOrganizationName(QStringLiteral("KeyShadow"));
     QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/app-icon.ico")));
 
     ks::ui::Theme::apply(app);
 
