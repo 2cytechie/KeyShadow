@@ -61,6 +61,7 @@ private:
     bool m_gameMode = false;
     bool m_inputWindowAttached = false;
     int m_currentPage = 0;
+    qint64 m_lastEscMs = 0; ///< 上次全屏内按下 Esc 的时刻（双击 Esc 退出全屏）
 };
 
 } // namespace ks::ui

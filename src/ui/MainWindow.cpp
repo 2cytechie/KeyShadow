@@ -12,6 +12,7 @@
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCloseEvent>
+#include <QDateTime>
 #include <QEvent>
 #include <QFrame>
 #include <QGuiApplication>
@@ -420,7 +421,18 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
         if (m_console && m_console->isEditing()) {
             return;
         }
-        setGameMode(false);
+        // Esc 留给屏幕操控（可绑定键位）：只有双击 Esc（<400ms）才退出全屏；
+        // 单击 Esc 交给键位映射（Raw Input），按住自动重复不算双击。
+        if (event->isAutoRepeat()) {
+            return;
+        }
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (m_lastEscMs > 0 && now - m_lastEscMs < 400) {
+            m_lastEscMs = 0;
+            setGameMode(false);
+            return;
+        }
+        m_lastEscMs = now;
         return;
     }
     QMainWindow::keyPressEvent(event);

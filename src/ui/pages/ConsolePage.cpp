@@ -12,6 +12,7 @@
 
 #include <QApplication>
 #include <QButtonGroup>
+#include <QCursor>
 #include <QDebug>
 #include <QCheckBox>
 #include <QComboBox>
@@ -387,7 +388,7 @@ void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
     m_statsOverlay->hide();
 
     connect(m_video, &VideoWidget::doubleClicked, this, [this] {
-        // 全屏下只允许 Esc / F11 退出；编辑与画布直操态双击属于手机/编辑操作。
+        // 全屏下只允许 F11 / 双击 Esc 退出；编辑与画布直操态双击属于手机/编辑操作。
         if (m_gameMode || m_mode == InputMode::Edit || canvasTouchActive()) {
             return;
         }
@@ -1145,14 +1146,22 @@ void ConsolePage::setInputMode(InputMode mode) {
     }
 
     switch (mode) {
-    case InputMode::Pointer:
+    case InputMode::Pointer: {
         m_video->setFocus();
         showHud(pointerHudText(), true);
+        // 仅全屏呼出鼠标时把光标定位到屏幕中央（画面中心），窗口态保持光标原位
+        if (m_gameMode) {
+            const QRect rect = m_video->videoRect();
+            if (!rect.isEmpty()) {
+                QCursor::setPos(m_video->mapToGlobal(rect.center()));
+            }
+        }
         if (m_mouseButton) {
             QSignalBlocker blocker(m_mouseButton);
             m_mouseButton->setChecked(true);
         }
         break;
+    }
     case InputMode::Mapping:
         if (previous == InputMode::Pointer) {
             showHud(QStringLiteral("已返回游戏操作"));
@@ -1953,10 +1962,7 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
             layoutVideoOverlays();
         } else if (event->type() == QEvent::KeyPress && m_mode == InputMode::Pointer) {
             auto *keyEvent = static_cast<QKeyEvent *>(event);
-            if (keyEvent->key() == Qt::Key_Escape) {
-                setInputMode(InputMode::Mapping);
-                return true;
-            }
+            // Esc 不再退出指针模式：留给屏幕操控（可绑定键位）；退出鼠标模式用呼出键/工具栏按钮
             const int vk = vkFromKeyEvent(*keyEvent);
             if (vk && vkMatchesSummon(vk, m_summonKey) && !keyEvent->isAutoRepeat()) {
                 if (m_summonMode == SummonMode::LongPress) {
