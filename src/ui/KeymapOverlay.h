@@ -23,8 +23,6 @@ public:
     int selected() const { return m_selected; }
     void setSelectedRegion(Region region);
     Region selectedRegion() const { return m_selectedRegion; }
-    void setGridEnabled(bool enabled);
-    void setSnapEnabled(bool enabled);
     void setEmptyHint(const QString &text);
 
 signals:
@@ -63,8 +61,6 @@ private:
     Profile m_profile;
     int m_selected = -1;
     Region m_selectedRegion = Region::None;
-    bool m_grid = true;
-    bool m_snap = true;
     bool m_dragging = false;
     QPointF m_dragOffset;
     bool m_draggingRegion = false;

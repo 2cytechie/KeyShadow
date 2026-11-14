@@ -154,10 +154,13 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     sprintHint->setWordWrap(true);
     addRow(inputSection, QString(), sprintHint);
 
+    m_humanizerCheck = new QCheckBox(QStringLiteral("开启拟人化（Pro）"), inputSection);
+    addRow(inputSection, QStringLiteral("拟人化"), m_humanizerCheck);
+
     m_humanizerStatus = new QLabel(inputSection);
     m_humanizerStatus->setProperty("variant", "micro");
     m_humanizerStatus->setWordWrap(true);
-    addRow(inputSection, QStringLiteral("拟人化"), m_humanizerStatus);
+    addRow(inputSection, QString(), m_humanizerStatus);
 
     auto *warning = new QLabel(
         QStringLiteral("风险提示：使用第三方触控工具可能被游戏安全系统识别。拟人化仅降低行为特征风险，"
@@ -218,7 +221,6 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
             });
     connect(m_bitrateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int) { storeProfile(); });
-    connect(m_audioCheck, &QCheckBox::toggled, this, [this](bool) { storeProfile(); });
     connect(m_screenOffCheck, &QCheckBox::toggled, this, [this](bool checked) {
         if (m_syncing) {
             return;
@@ -232,7 +234,26 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
             return;
         }
         m_session->setScreenOff(checked);
-        storeProfile();
+    });
+    connect(m_audioCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (!m_syncing && m_session) {
+            m_session->setAudioEnabled(checked);
+        }
+    });
+    connect(m_humanizerCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_syncing || !m_session) {
+            return;
+        }
+        if (checked && !LicenseManager::instance().isPro()) {
+            m_syncing = true;
+            m_humanizerCheck->setChecked(false);
+            m_syncing = false;
+            QMessageBox::information(this, QStringLiteral("Pro 功能"),
+                                     QStringLiteral("拟人化为 Pro 功能，激活后解锁。"));
+            return;
+        }
+        m_session->setHumanizerEnabled(checked);
+        syncFromProfile();
     });
     connect(m_statsOverlayCheck, &QCheckBox::toggled, this, [this](bool checked) {
         if (m_syncing) {
@@ -497,15 +518,19 @@ void SettingsPage::syncFromProfile() {
                                                                 : mbps <= 16 ? 3
                                                                 : mbps <= 24 ? 4
                                                                              : 5);
-    m_audioCheck->setChecked(profile.audioEnabled);
-    m_screenOffCheck->setChecked(profile.screenOff);
+    m_audioCheck->setChecked(m_session->audioEnabled());
+    m_screenOffCheck->setChecked(m_session->screenOff());
     m_statsOverlayCheck->setChecked(
         QSettings().value(QStringLiteral("display/statsOverlay"), true).toBool());
+    m_humanizerCheck->setChecked(m_session->humanizerEnabled());
 
     const bool pro = LicenseManager::instance().isPro();
     if (m_humanizerStatus) {
-        m_humanizerStatus->setText(pro ? QStringLiteral("付费版自动开启（触控抖动与随机时序）")
-                                       : QStringLiteral("基础版固定时序，付费版自动开启"));
+        const bool enabled = m_session->humanizerEnabled();
+        m_humanizerStatus->setText(
+            enabled && pro ? QStringLiteral("已开启：触控抖动与随机时序")
+                           : pro ? QStringLiteral("已关闭：可手动开启触控抖动与随机时序")
+                                 : QStringLiteral("基础版不可用，激活 Pro 后可开启"));
     }
     m_licenseLabel->setText(pro ? QStringLiteral("PRO · 永久有效")
                                 : QStringLiteral("基础版 · 功能不受限时可正常游玩"));
@@ -527,7 +552,6 @@ void SettingsPage::storeProfile() {
     profile.maxSize = resolutions[std::clamp(m_resolutionCombo->currentIndex(), 0, 3)];
     profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 3)];
     profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 5)] * 1'000'000;
-    profile.audioEnabled = m_audioCheck->isChecked();
     m_session->applyProfile(profile, true);
 }
 

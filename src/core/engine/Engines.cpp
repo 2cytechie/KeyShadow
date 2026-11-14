@@ -32,6 +32,17 @@ QPointF jitteredCenter(HumanizerEngine *humanizer, const QPointF &centerPx, doub
                    std::clamp(shifted.y(), 0.0, std::max(0, screenHeight - 1) * 1.0));
 }
 
+QPointF jitteredLookCenter(HumanizerEngine *humanizer, const QPointF &centerPx,
+                           double radiusX, double radiusY, int screenWidth, int screenHeight) {
+    const double jitterRadius = std::min(radiusX, radiusY);
+    const QPointF shifted(centerPx.x() + (humanizer ? humanizer->regionJitter(jitterRadius) : 0),
+                          centerPx.y() + (humanizer ? humanizer->regionJitter(jitterRadius) : 0));
+    return QPointF(std::clamp(shifted.x(), radiusX,
+                              std::max(radiusX, static_cast<double>(screenWidth - 1) - radiusX)),
+                   std::clamp(shifted.y(), radiusY,
+                              std::max(radiusY, static_cast<double>(screenHeight - 1) - radiusY)));
+}
+
 double easeOutCubic(double t) {
     const double inv = 1.0 - t;
     return 1.0 - inv * inv * inv;
@@ -62,6 +73,12 @@ double qpcFrequencyHz() {
         return static_cast<double>(value.QuadPart);
     }();
     return freq;
+}
+
+QPointF clampNormalizedRegionCenter(const QPointF &center, double radius) {
+    const double r = std::clamp(radius, 0.0, 0.5);
+    return QPointF(std::clamp(center.x(), r, 1.0 - r),
+                   std::clamp(center.y(), r, 1.0 - r));
 }
 
 bool vkMatchesSummon(int eventVk, int summonVk) {
@@ -251,8 +268,8 @@ bool JoystickEngine::tick(int dtMs, const std::function<void(const QByteArray &)
 // ---------------------------------------------------------------------------
 void LookEngine::configure(const QPointF &centerNorm, double radiusNorm, double sensitivity,
                            double countsPer180, int screenWidth, int screenHeight) {
-    m_center = centerNorm;
     m_radius = std::clamp(radiusNorm, 0.05, 0.45);
+    m_center = clampNormalizedRegionCenter(centerNorm, m_radius);
     m_sensitivity = std::clamp(sensitivity, 0.05, 10.0);
     m_countsPer180 = std::max(50.0, countsPer180);
     m_screenWidth = std::max(1, screenWidth);
@@ -306,9 +323,8 @@ bool LookEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &s
         }
         m_recentering = false;
         m_active = true;
-        m_basePixel = jitteredCenter(m_humanizer, centerPx,
-                                     m_radius * std::min(m_screenWidth, m_screenHeight),
-                                     m_screenWidth, m_screenHeight);
+        m_basePixel = jitteredLookCenter(m_humanizer, centerPx, radiusX, radiusY, m_screenWidth,
+                                         m_screenHeight);
         m_fingerPixel = m_basePixel;
         emitTouch(send, static_cast<int>(proto::TouchAction::Down),
                   static_cast<int>(std::lround(m_basePixel.x())),
@@ -324,9 +340,8 @@ bool LookEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &s
         }
         // 首次按下：Down 当帧不移动，避免按下帧就携带大位移。
         m_active = true;
-        m_basePixel = jitteredCenter(m_humanizer, centerPx,
-                                     m_radius * std::min(m_screenWidth, m_screenHeight),
-                                     m_screenWidth, m_screenHeight);
+        m_basePixel = jitteredLookCenter(m_humanizer, centerPx, radiusX, radiusY, m_screenWidth,
+                                         m_screenHeight);
         m_fingerPixel = m_basePixel;
         emitTouch(send, static_cast<int>(proto::TouchAction::Down),
                   static_cast<int>(std::lround(m_basePixel.x())),
@@ -341,35 +356,45 @@ bool LookEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &s
     m_pendingX = 0.0;
     m_pendingY = 0.0;
 
-    // lift-recenter：手指滑到边界 → Up →（下一 tick 起延迟回中 Down）→ 继续。
-    // 未走完的位移缓存到 pending，回中后接着消费，不丢距离。
-    int guard = 0;
-    while ((std::abs(remainingX) > 0.01 || std::abs(remainingY) > 0.01) && guard++ < 16) {
-        const double roomX = remainingX >= 0 ? (m_basePixel.x() + radiusX - m_fingerPixel.x())
-                                             : (m_fingerPixel.x() - (m_basePixel.x() - radiusX));
-        const double roomY = remainingY >= 0 ? (m_basePixel.y() + radiusY - m_fingerPixel.y())
-                                             : (m_fingerPixel.y() - (m_basePixel.y() - radiusY));
-        const double stepX = std::clamp(remainingX, -std::max(0.0, roomX), std::max(0.0, roomX));
-        const double stepY = std::clamp(remainingY, -std::max(0.0, roomY), std::max(0.0, roomY));
+    // lift-recenter：手指滑到椭圆边界 → Up →（下一 tick 起延迟回中 Down）→ 继续。
+    // 计算当前移动向量与椭圆的交点，避免原先独立限制 X/Y 造成矩形角点越界。
+    const QPointF delta(remainingX, remainingY);
+    const double nx = (m_fingerPixel.x() - m_basePixel.x()) / radiusX;
+    const double ny = (m_fingerPixel.y() - m_basePixel.y()) / radiusY;
+    const double targetX = (m_fingerPixel.x() + delta.x() - m_basePixel.x()) / radiusX;
+    const double targetY = (m_fingerPixel.y() + delta.y() - m_basePixel.y()) / radiusY;
+    const double targetNorm = targetX * targetX + targetY * targetY;
 
-        if (std::abs(stepX) < 0.01 && std::abs(stepY) < 0.01) {
-            // 已到边界：抬起，进入回中等待；剩余位移留到回中后继续。
-            emitTouch(send, static_cast<int>(proto::TouchAction::Up),
-                      static_cast<int>(std::lround(m_fingerPixel.x())),
-                      static_cast<int>(std::lround(m_fingerPixel.y())));
-            m_recentering = true;
-            m_recenterDelayMs = kRecenterGapMs;
-            m_pendingX = remainingX;
-            m_pendingY = remainingY;
-            break;
+    double stepFactor = 1.0;
+    if (targetNorm > 1.0 + 1e-9) {
+        const double a = (delta.x() * delta.x()) / (radiusX * radiusX) +
+                         (delta.y() * delta.y()) / (radiusY * radiusY);
+        const double b = 2.0 * (nx * delta.x() / radiusX + ny * delta.y() / radiusY);
+        const double c = nx * nx + ny * ny - 1.0;
+        if (a > 1e-12) {
+            const double discriminant = std::max(0.0, b * b - 4.0 * a * c);
+            stepFactor = std::clamp((-b + std::sqrt(discriminant)) / (2.0 * a), 0.0, 1.0);
         }
+    }
 
-        m_fingerPixel += QPointF(stepX, stepY);
+    const QPointF step = delta * stepFactor;
+    if (std::abs(step.x()) >= 0.01 || std::abs(step.y()) >= 0.01) {
+        m_fingerPixel += step;
         emitTouch(send, static_cast<int>(proto::TouchAction::Move),
                   static_cast<int>(std::lround(m_fingerPixel.x())),
                   static_cast<int>(std::lround(m_fingerPixel.y())));
-        remainingX -= stepX;
-        remainingY -= stepY;
+    }
+
+    remainingX -= step.x();
+    remainingY -= step.y();
+    if (std::abs(remainingX) > 0.01 || std::abs(remainingY) > 0.01) {
+        emitTouch(send, static_cast<int>(proto::TouchAction::Up),
+                  static_cast<int>(std::lround(m_fingerPixel.x())),
+                  static_cast<int>(std::lround(m_fingerPixel.y())));
+        m_recentering = true;
+        m_recenterDelayMs = kRecenterGapMs;
+        m_pendingX = remainingX;
+        m_pendingY = remainingY;
     }
 
     return true;
@@ -591,6 +616,8 @@ void InputEngine::applyJoystickConfig() {
 
 void InputEngine::setProfile(const Profile &profile) {
     m_profile = profile;
+    m_profile.lookRadius = std::clamp(m_profile.lookRadius, 0.05, 0.45);
+    m_profile.lookCenter = clampNormalizedRegionCenter(m_profile.lookCenter, m_profile.lookRadius);
     m_humanizer.setEnabled(profile.humanizerEnabled);
     m_humanizer.setEnhanced(profile.proHumanizer);
     applyJoystickConfig();
@@ -600,6 +627,22 @@ void InputEngine::setScreenSize(int width, int height) {
     m_screenWidth = std::max(1, width);
     m_screenHeight = std::max(1, height);
     applyJoystickConfig();
+}
+
+void InputEngine::setLookEnabled(bool enabled) {
+    if (m_lookEnabled == enabled) {
+        return;
+    }
+    m_lookEnabled = enabled;
+    if (!enabled) {
+        // 视角由注入线程在切换瞬间先 release，再清掉可能已经排队的残留位移。
+        m_look.reset();
+        for (int i = m_pendingEvents.size() - 1; i >= 0; --i) {
+            if (m_pendingEvents.at(i).type == InputEventType::MouseMove) {
+                m_pendingEvents.removeAt(i);
+            }
+        }
+    }
 }
 
 void InputEngine::handleInput(const InputEvent &event) {
@@ -700,7 +743,11 @@ void InputEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &
     m_pendingEvents.clear();
 
     m_joystick.tick(dtMs, send);
-    m_look.tick(dtMs, send);
+    if (m_lookEnabled) {
+        m_look.tick(dtMs, send);
+    } else {
+        m_look.reset();
+    }
     m_keymap.tick(dtMs, send);
 
     if (hadEvents && m_lastInputQpc > 0) {

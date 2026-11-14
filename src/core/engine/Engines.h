@@ -25,6 +25,9 @@ constexpr int kVkWheelDown = 0x0B;
 qint64 qpcNowTicks();
 double qpcFrequencyHz();
 
+/// Clamp a normalized region center so an ellipse with the given radius stays on screen.
+QPointF clampNormalizedRegionCenter(const QPointF &center, double radius);
+
 // ---------------------------------------------------------------------------
 // 输入事件（由 RawInputFilter 产生，主线程投递到注入线程）
 // ---------------------------------------------------------------------------
@@ -64,8 +67,8 @@ struct Profile {
     double lookSensitivity = 1.0;
     double lookCountsPer180 = 3000.0; ///< 校准结果：180° 转身所需鼠标计数
 
-    /// 运行期有效值：由 Session 按授权写入（Pro 自动开启），不持久化、不提供 UI。
-    bool humanizerEnabled = true;
+    /// 运行期注入值：Session 按全局设置与授权状态决定实际是否启用。
+    bool humanizerEnabled = false;
     bool proHumanizer = false;
 
     QVector<KeyBinding> bindings;
@@ -293,7 +296,7 @@ public:
     /// 画布触控拖动进行中：丢弃鼠标位移，避免滑动手机 UI 时视角同时转动。
     void setTouchDragActive(bool active) { m_touchDragActive = active; }
     /// 指针模式：系统光标用于点击手机 UI，鼠标位移不再驱动视角（键盘/其它鼠标键仍映射）。
-    void setLookEnabled(bool enabled) { m_lookEnabled = enabled; }
+    void setLookEnabled(bool enabled);
     /// 清空「已抬起但物理仍按住」的按键集合。
     void clearSuspendedKeys();
 

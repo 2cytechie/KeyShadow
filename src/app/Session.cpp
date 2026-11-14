@@ -18,6 +18,8 @@ namespace ks {
 Session::Session(QObject *parent) : QObject(parent) {
     m_profile = ProfileStore::makeDefaultProfile();
     reloadProfiles();
+    loadGlobalSettings();
+    applyProfile(m_profile, false);
 
     QSettings settings;
     m_summonKey = settings.value(QStringLiteral("input/summonKey"), 0x12).toInt();
@@ -221,7 +223,7 @@ void Session::connectDevice(const QString &serial) {
     config.videoBitRate = m_profile.videoBitRate;
     config.maxFps = m_profile.maxFps;
     config.maxSize = m_profile.maxSize;
-    config.audio = m_profile.audioEnabled;
+    config.audio = m_audioEnabled;
 
     if (config.serverJarPath.isEmpty()) {
         setState(State::Error, QStringLiteral("scrcpy-server 准备失败"));
@@ -311,6 +313,26 @@ void Session::tryReconnect() {
     connectDevice(m_serial);
 }
 
+void Session::loadGlobalSettings() {
+    QSettings settings;
+
+    if (!settings.contains(QStringLiteral("video/audioEnabled"))) {
+        settings.setValue(QStringLiteral("video/audioEnabled"), m_profile.audioEnabled);
+    }
+    if (!settings.contains(QStringLiteral("video/screenOff"))) {
+        settings.setValue(QStringLiteral("video/screenOff"), m_profile.screenOff);
+    }
+    if (!settings.contains(QStringLiteral("input/humanizerEnabled"))) {
+        settings.setValue(QStringLiteral("input/humanizerEnabled"), false);
+    }
+
+    m_audioEnabled = settings.value(QStringLiteral("video/audioEnabled"), true).toBool();
+    m_screenOff = settings.value(QStringLiteral("video/screenOff"), false).toBool();
+    m_humanizerEnabled =
+        settings.value(QStringLiteral("input/humanizerEnabled"), false).toBool();
+    m_globalSettingsLoaded = true;
+}
+
 void Session::reloadProfiles() {
     const QVector<Profile> profiles = m_store.loadAll();
     m_profileNames.clear();
@@ -336,11 +358,17 @@ void Session::applyProfile(const Profile &profile, bool persist) {
         // 90/120fps 为付费功能：未激活时统一钳制到 60（导入方案/旧文件兜底）。
         m_profile.maxFps = 60;
     }
-    // 拟人化为付费能力：不读取方案偏好，注入侧按授权统一决定。
+    if (m_globalSettingsLoaded) {
+        // 音频、息屏和拟人化是全局设置，不随键位方案切换。
+        m_profile.audioEnabled = m_audioEnabled;
+        m_profile.screenOff = m_screenOff;
+        m_profile.humanizerEnabled = m_humanizerEnabled;
+    }
+    // 拟人化为付费能力：授权只决定是否允许，实际开关由全局设置决定。
     Profile injected = m_profile;
     const bool pro = LicenseManager::instance().isPro();
-    injected.humanizerEnabled = pro;
-    injected.proHumanizer = pro;
+    injected.humanizerEnabled = pro && m_humanizerEnabled;
+    injected.proHumanizer = pro && m_humanizerEnabled;
     m_injection.setProfile(injected);
     QSettings().setValue(QStringLiteral("profile/lastName"), m_profile.name);
     if (persist) {
@@ -476,11 +504,26 @@ void Session::setLookEnabled(bool enabled) { m_injection.setLookEnabled(enabled)
 
 void Session::setScreenOff(bool off) {
     m_screenOff = off;
+    QSettings().setValue(QStringLiteral("video/screenOff"), off);
     m_profile.screenOff = off;
     m_injection.sendMessage(proto::displayPower(!off));
     if (off) {
         emit logMessage(QStringLiteral("已开启息屏投屏"));
     }
+}
+
+void Session::setAudioEnabled(bool enabled) {
+    m_audioEnabled = enabled;
+    QSettings().setValue(QStringLiteral("video/audioEnabled"), enabled);
+    m_profile.audioEnabled = enabled;
+    emit profileChanged(m_profile);
+}
+
+void Session::setHumanizerEnabled(bool enabled) {
+    m_humanizerEnabled = enabled;
+    QSettings().setValue(QStringLiteral("input/humanizerEnabled"), enabled);
+    m_profile.humanizerEnabled = enabled;
+    applyProfile(m_profile, false);
 }
 
 void Session::beginCalibration() { m_injection.beginCalibration(); }

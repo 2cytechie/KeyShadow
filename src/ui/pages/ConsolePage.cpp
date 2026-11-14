@@ -14,7 +14,6 @@
 #include <QButtonGroup>
 #include <QCursor>
 #include <QDebug>
-#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDir>
@@ -65,6 +64,11 @@ QString formatQualityValue(const QString &key, int value, const QString &suffix)
         return value > 0 ? QStringLiteral("+%1").arg(value) : QString::number(value);
     }
     return QStringLiteral("%1%2").arg(value).arg(suffix);
+}
+
+void normalizeLookProfile(Profile &profile) {
+    profile.lookRadius = std::clamp(profile.lookRadius, 0.05, 0.45);
+    profile.lookCenter = clampNormalizedRegionCenter(profile.lookCenter, profile.lookRadius);
 }
 
 QPushButton *makeToolButton(QWidget *parent, const QString &text, const char *variant = nullptr) {
@@ -120,6 +124,14 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
         if (m_summonHeld) {
             enterPointerMode();
         }
+    });
+
+    m_keyCaptureTimer = new QTimer(this);
+    m_keyCaptureTimer->setSingleShot(true);
+    m_keyCaptureTimer->setInterval(5000);
+    connect(m_keyCaptureTimer, &QTimer::timeout, this, [this] {
+        stopKeyCapture();
+        showHud(QStringLiteral("按键监听已超时"));
     });
 
     m_qualityPanel->installEventFilter(this);
@@ -628,16 +640,6 @@ QWidget *ConsolePage::buildKeymapTab() {
     edit->setContentsMargins(0, 0, 0, 0);
     edit->setSpacing(10);
 
-    auto *toggleRow = new QHBoxLayout();
-    m_gridCheck = new QCheckBox(QStringLiteral("网格"), m_editBox);
-    m_gridCheck->setChecked(true);
-    m_snapCheck = new QCheckBox(QStringLiteral("吸附"), m_editBox);
-    m_snapCheck->setChecked(true);
-    toggleRow->addWidget(m_gridCheck);
-    toggleRow->addWidget(m_snapCheck);
-    toggleRow->addStretch(1);
-    edit->addLayout(toggleRow);
-
     auto *toolRow = new QHBoxLayout();
     m_addBindingButton = makeToolButton(m_editBox, QStringLiteral("添加键位"), "ghost");
     m_saveKeymapButton = makeToolButton(m_editBox, QStringLiteral("保存"), "primary");
@@ -675,6 +677,9 @@ QWidget *ConsolePage::buildKeymapTab() {
     keyRow->addWidget(new QLabel(QStringLiteral("按键"), m_editBox));
     m_keyCaptureButton = new QPushButton(QStringLiteral("--"), m_editBox);
     keyRow->addWidget(m_keyCaptureButton, 1);
+    m_cancelKeyCaptureButton = new QPushButton(QStringLiteral("取消监听"), m_editBox);
+    m_cancelKeyCaptureButton->setVisible(false);
+    keyRow->addWidget(m_cancelKeyCaptureButton);
     edit->addLayout(keyRow);
 
     auto *positionRow = new QHBoxLayout();
@@ -741,10 +746,6 @@ QWidget *ConsolePage::buildKeymapTab() {
             &ConsolePage::importKeymapProfile);
     connect(m_exportProfileButton, &QPushButton::clicked, this,
             &ConsolePage::exportKeymapProfile);
-    connect(m_gridCheck, &QCheckBox::toggled, this,
-            [this](bool on) { m_overlay->setGridEnabled(on); });
-    connect(m_snapCheck, &QCheckBox::toggled, this,
-            [this](bool on) { m_overlay->setSnapEnabled(on); });
     connect(m_addBindingButton, &QPushButton::clicked, this, &ConsolePage::addKeymapBinding);
     connect(m_saveKeymapButton, &QPushButton::clicked, this, &ConsolePage::saveKeymap);
     connect(m_exitEditButton, &QPushButton::clicked, this, [this] {
@@ -755,6 +756,8 @@ QWidget *ConsolePage::buildKeymapTab() {
     connect(m_deleteBindingButton, &QPushButton::clicked, this,
             &ConsolePage::deleteKeymapBinding);
     connect(m_keyCaptureButton, &QPushButton::clicked, this, &ConsolePage::startKeyCapture);
+    connect(m_cancelKeyCaptureButton, &QPushButton::clicked, this,
+            &ConsolePage::stopKeyCapture);
     connect(m_xSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
             [this](int) { applyBindingFromUi(); });
     connect(m_ySpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
@@ -882,6 +885,7 @@ void ConsolePage::refreshProfileToUi() {
 
     if (m_mode != InputMode::Edit && !m_keymapDirty) {
         m_keymapProfile = profile;
+        normalizeLookProfile(m_keymapProfile);
         m_overlay->setProfile(m_keymapProfile);
         refreshKeymapSummary();
         refreshKeymapProperties();
@@ -1136,6 +1140,10 @@ void ConsolePage::setInputMode(InputMode mode) {
     m_draggingTouch = false;
     if (m_session) {
         m_session->setTouchDragActive(false);
+        if (mode == InputMode::Pointer) {
+            // 先关闭视角，再移动系统光标，避免光标定位产生的 Raw Input 被当成视角位移。
+            m_session->setLookEnabled(false);
+        }
     }
 
     if (mode != InputMode::Edit) {
@@ -1378,8 +1386,6 @@ void ConsolePage::beginKeymapEditInternal() {
     m_overlay->setProfile(m_keymapProfile);
     m_overlay->setSelected(-1);
     m_overlay->setSelectedRegion(KeymapOverlay::Region::None);
-    m_overlay->setGridEnabled(m_gridCheck->isChecked());
-    m_overlay->setSnapEnabled(m_snapCheck->isChecked());
     m_overlay->setEmptyHint(m_video->hasFrame() ? QString()
                                                 : QStringLiteral("未连接投屏，坐标按比例编辑"));
 
@@ -1492,6 +1498,7 @@ void ConsolePage::loadKeymapProfile(const QString &name) {
         return;
     }
     m_keymapProfile = profile;
+    normalizeLookProfile(m_keymapProfile);
     m_keymapSelected = -1;
     setRegionTarget(0);
     m_keymapDirty = false;
@@ -1533,6 +1540,7 @@ void ConsolePage::createKeymapProfile() {
     }
 
     Profile profile = m_keymapProfile;
+    normalizeLookProfile(profile);
     profile.name = name;
     QString error;
     if (!m_session->profileStore().save(profile, &error)) {
@@ -1583,6 +1591,7 @@ void ConsolePage::importKeymapProfile() {
         return;
     }
     m_keymapProfile = imported;
+    normalizeLookProfile(m_keymapProfile);
     m_keymapDirty = false;
     m_session->applyProfile(imported, false);
     reloadKeymapProfiles();
@@ -1746,6 +1755,7 @@ void ConsolePage::saveKeymap() {
     if (!m_session) {
         return;
     }
+    normalizeLookProfile(m_keymapProfile);
     m_session->applyProfile(m_keymapProfile, true);
     m_keymapDirty = false;
     refreshKeymapSummary();
@@ -1787,6 +1797,12 @@ void ConsolePage::startKeyCapture() {
     }
     m_capturingKey = true;
     m_keyCaptureButton->setText(QStringLiteral("请按键…"));
+    if (m_cancelKeyCaptureButton) {
+        m_cancelKeyCaptureButton->setVisible(true);
+    }
+    if (m_keyCaptureTimer) {
+        m_keyCaptureTimer->start();
+    }
     qApp->installEventFilter(this);
 }
 
@@ -1796,6 +1812,12 @@ void ConsolePage::stopKeyCapture() {
     }
     m_capturingKey = false;
     qApp->removeEventFilter(this);
+    if (m_keyCaptureTimer) {
+        m_keyCaptureTimer->stop();
+    }
+    if (m_cancelKeyCaptureButton) {
+        m_cancelKeyCaptureButton->setVisible(false);
+    }
     refreshKeymapProperties();
 }
 
@@ -1814,9 +1836,10 @@ void ConsolePage::applyBindingFromUi() {
             m_keymapProfile.joystickRadius = inner;
             m_keymapProfile.joystickSprintRadius = outer;
         } else {
-            m_keymapProfile.lookCenter = center;
             m_keymapProfile.lookRadius =
                 std::clamp(m_sizeSlider->value() / 1000.0, 0.05, 0.45);
+            m_keymapProfile.lookCenter =
+                clampNormalizedRegionCenter(center, m_keymapProfile.lookRadius);
         }
         m_overlay->setProfile(m_keymapProfile);
         m_overlay->setSelectedRegion(
@@ -1893,14 +1916,9 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
     if (m_capturingKey) {
         if (event->type() == QEvent::KeyPress) {
             auto *keyEvent = static_cast<QKeyEvent *>(event);
-            if (keyEvent->key() == Qt::Key_Escape) {
-                stopKeyCapture();
-                return true;
-            }
             if (!keyEvent->isAutoRepeat() && selectedBinding() >= 0) {
                 m_keymapProfile.bindings[m_keymapSelected].vk = vkFromKeyEvent(*keyEvent);
-                m_capturingKey = false;
-                qApp->removeEventFilter(this);
+                stopKeyCapture();
                 m_overlay->setProfile(m_keymapProfile);
                 refreshKeymapProperties();
                             markKeymapDirty();
@@ -1915,8 +1933,7 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
             if (angle != 0 && selectedBinding() >= 0) {
                 m_keymapProfile.bindings[m_keymapSelected].vk =
                     angle > 0 ? ks::kVkWheelUp : ks::kVkWheelDown;
-                m_capturingKey = false;
-                qApp->removeEventFilter(this);
+                stopKeyCapture();
                 m_overlay->setProfile(m_keymapProfile);
                 refreshKeymapProperties();
                 markKeymapDirty();
@@ -1924,6 +1941,9 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
             return true;
         }
         if (event->type() == QEvent::MouseButtonPress) {
+            if (watched == m_cancelKeyCaptureButton) {
+                return QWidget::eventFilter(watched, event);
+            }
             auto *mouseEvent = static_cast<QMouseEvent *>(event);
             int vk = 0;
             if (mouseEvent->button() == Qt::LeftButton) {
@@ -1939,8 +1959,7 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
             }
             if (vk && selectedBinding() >= 0) {
                 m_keymapProfile.bindings[m_keymapSelected].vk = vk;
-                m_capturingKey = false;
-                qApp->removeEventFilter(this);
+                stopKeyCapture();
                 m_overlay->setProfile(m_keymapProfile);
                 refreshKeymapProperties();
                             markKeymapDirty();

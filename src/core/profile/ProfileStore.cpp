@@ -89,8 +89,9 @@ Profile profileFromJson(const QJsonObject &obj) {
     profile.joystickCurve = joystick.value(QStringLiteral("curve")).toDouble(1.0);
 
     const QJsonObject look = obj.value(QStringLiteral("look")).toObject();
-    profile.lookCenter = pointFromJson(look.value(QStringLiteral("center")).toObject());
-    profile.lookRadius = look.value(QStringLiteral("radius")).toDouble(0.23);
+    profile.lookRadius = std::clamp(look.value(QStringLiteral("radius")).toDouble(0.23), 0.05, 0.45);
+    profile.lookCenter = clampNormalizedRegionCenter(
+        pointFromJson(look.value(QStringLiteral("center")).toObject()), profile.lookRadius);
     profile.lookSensitivity = look.value(QStringLiteral("sensitivity")).toDouble(1.0);
     profile.lookCountsPer180 = look.value(QStringLiteral("countsPer180")).toDouble(3000.0);
 

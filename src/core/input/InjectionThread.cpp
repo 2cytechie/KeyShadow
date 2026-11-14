@@ -175,6 +175,7 @@ void InjectionThread::loop() {
     bool directTouch = false;
     bool touchDrag = false;
     bool sprint = false;
+    bool lookEnabled = true;
 
     qint64 previous = qpcNow();
     double accumulator = 0.0;
@@ -192,6 +193,9 @@ void InjectionThread::loop() {
         accumulator += elapsed;
 
         // 拉取主线程投递的数据
+        bool screenSizeChanged = false;
+        int nextScreenWidth = screenWidth;
+        int nextScreenHeight = screenHeight;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (!m_events.isEmpty()) {
@@ -208,11 +212,11 @@ void InjectionThread::loop() {
                 m_profileDirty = false;
             }
             if (m_pendingScreenWidth > 0 && m_pendingScreenHeight > 0) {
-                screenWidth = m_pendingScreenWidth;
-                screenHeight = m_pendingScreenHeight;
+                nextScreenWidth = m_pendingScreenWidth;
+                nextScreenHeight = m_pendingScreenHeight;
                 m_pendingScreenWidth = 0;
                 m_pendingScreenHeight = 0;
-                m_engine.setScreenSize(screenWidth, screenHeight);
+                screenSizeChanged = nextScreenWidth != screenWidth || nextScreenHeight != screenHeight;
             }
             directTouch = m_directTouch;
             touchDrag = m_touchDrag;
@@ -222,7 +226,18 @@ void InjectionThread::loop() {
         m_engine.setDirectTouchEnabled(directTouch);
         m_engine.setTouchDragActive(touchDrag);
         m_engine.setSprint(sprint);
-        m_engine.setLookEnabled(m_lookEnabled.load());
+        const bool nextLookEnabled = m_lookEnabled.load();
+        if (lookEnabled && !nextLookEnabled) {
+            m_engine.look().release(send);
+        }
+        if (screenSizeChanged) {
+            m_engine.releaseAll(send);
+            screenWidth = nextScreenWidth;
+            screenHeight = nextScreenHeight;
+            m_engine.setScreenSize(screenWidth, screenHeight);
+        }
+        lookEnabled = nextLookEnabled;
+        m_engine.setLookEnabled(nextLookEnabled);
         if (m_clearSuspended.exchange(false)) {
             m_engine.clearSuspendedKeys();
         }

@@ -165,8 +165,11 @@ void testWasdJoystick() {
 
 // ---------------------------------------------------------------------------
 void testLookEngine() {
+    ks::HumanizerEngine humanizer;
+    humanizer.setEnabled(false);
     ks::LookEngine look;
     look.configure(QPointF(0.5, 0.5), 0.2, 1.0, 1000.0, 1000, 1000);
+    look.setHumanizer(&humanizer);
 
     std::vector<QByteArray> messages;
     auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
@@ -193,16 +196,56 @@ void testLookEngine() {
     }
     check(upCount >= 1, "look engine lifts and recenters beyond boundary");
 
-    // 触点必须始终在触发区内（中心本身带 ±6% 半径拟人化抖动，容差 = 200 + 16）
+    // 触点必须始终在椭圆触发区内。
     bool inside = true;
     for (const QByteArray &message : messages) {
         const int x = static_cast<int>(read32(message, 10));
         const int y = static_cast<int>(read32(message, 14));
-        if (std::abs(x - 500) > 216 || std::abs(y - 500) > 216) {
+        const double nx = (x - 500.0) / 200.0;
+        const double ny = (y - 500.0) / 200.0;
+        if (nx * nx + ny * ny > 1.0001) {
             inside = false;
         }
     }
-    check(inside, "look touch stays within radius");
+    check(inside, "look touch stays within ellipse");
+}
+
+// ---------------------------------------------------------------------------
+void testLookEllipseBoundary() {
+    ks::HumanizerEngine humanizer;
+    humanizer.setEnabled(false);
+    ks::LookEngine look;
+    look.configure(QPointF(0.5, 0.5), 0.2, 1.0, 1000.0, 1000, 1000);
+    look.setHumanizer(&humanizer);
+
+    std::vector<QByteArray> messages;
+    auto sink = [&messages](const QByteArray &message) { messages.push_back(message); };
+
+    look.addDelta(1500, 1500, 0);
+    look.tick(4, sink); // DOWN
+    messages.clear();
+    look.tick(4, sink); // diagonal boundary + UP
+
+    bool inside = true;
+    for (const QByteArray &message : messages) {
+        const int x = static_cast<int>(read32(message, 10));
+        const int y = static_cast<int>(read32(message, 14));
+        const double nx = (x - 500.0) / 200.0;
+        const double ny = (y - 500.0) / 200.0;
+        if (nx * nx + ny * ny > 1.0001) {
+            inside = false;
+        }
+    }
+    check(inside, "diagonal look movement stays inside ellipse");
+
+    messages.clear();
+    look.reset();
+    look.configure(QPointF(0.0, 0.0), 0.2, 1.0, 1000.0, 1000, 1000);
+    look.addDelta(1, 0, 0);
+    look.tick(4, sink);
+    check(!messages.empty() && read32(messages.front(), 10) == 200 &&
+              read32(messages.front(), 14) == 200,
+          "look center is clamped to keep ellipse on screen");
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +488,15 @@ void testLookGating() {
     engine.handleInput(move);
     engine.tick(10, sink);
     check(!messages.empty(), "look resumes when enabled");
+
+    messages.clear();
+    engine.handleInput(move);
+    engine.setLookEnabled(false);
+    engine.tick(10, sink);
+    check(messages.empty(), "disabling look drops queued movement");
+    engine.setLookEnabled(true);
+    engine.tick(10, sink);
+    check(messages.empty(), "re-enabling look does not replay stale movement");
 }
 
 // ---------------------------------------------------------------------------
@@ -653,6 +705,12 @@ void testProfileStore() {
     store.remove(QStringLiteral("测试疾跑钳制"));
 }
 
+// ---------------------------------------------------------------------------
+void testDefaultProfile() {
+    const ks::Profile profile = ks::ProfileStore::makeDefaultProfile();
+    check(!profile.humanizerEnabled, "humanizer is disabled by default");
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -664,6 +722,7 @@ int main(int argc, char *argv[]) {
     testJoystickSprint();
     testWasdJoystick();
     testLookEngine();
+    testLookEllipseBoundary();
     testLookRecenterTiming();
     testMouseButtonVk();
     testKeymap();
@@ -675,6 +734,7 @@ int main(int argc, char *argv[]) {
     testRegionJitter();
     testCalibrator();
     testProfileStore();
+    testDefaultProfile();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

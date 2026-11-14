@@ -54,6 +54,7 @@ private:
     QCheckBox *m_audioCheck = nullptr;
     QCheckBox *m_screenOffCheck = nullptr;
     QCheckBox *m_statsOverlayCheck = nullptr;
+    QCheckBox *m_humanizerCheck = nullptr;
     QLabel *m_humanizerStatus = nullptr;
     QLabel *m_licenseLabel = nullptr;
     QPushButton *m_summonButton = nullptr;

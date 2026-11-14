@@ -5,7 +5,6 @@
 
 #include "core/engine/Engines.h"
 
-class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QButtonGroup;
@@ -183,11 +182,10 @@ private:
     QPushButton *m_exportProfileButton = nullptr;
     QLabel *m_keymapSummary = nullptr;
     QPushButton *m_editKeymapButton = nullptr;
-    QCheckBox *m_gridCheck = nullptr;
-    QCheckBox *m_snapCheck = nullptr;
     QPushButton *m_addBindingButton = nullptr;
     QPushButton *m_saveKeymapButton = nullptr;
     QPushButton *m_exitEditButton = nullptr;
+    QPushButton *m_cancelKeyCaptureButton = nullptr;
     QSlider *m_sensitivitySlider = nullptr;
     QDoubleSpinBox *m_sensitivitySpin = nullptr;
     QLabel *m_sizeLabel = nullptr;
@@ -208,6 +206,7 @@ private:
     QTimer *m_hudTimer = nullptr;
     QTimer *m_summonHintTimer = nullptr;
     QTimer *m_summonHoldTimer = nullptr;
+    QTimer *m_keyCaptureTimer = nullptr;
 
     InputMode m_mode = InputMode::Idle;
     bool m_active = false;

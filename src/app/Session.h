@@ -87,6 +87,11 @@ public:
     void postInputEvent(const InputEvent &event);
 
     void setScreenOff(bool off);
+    void setAudioEnabled(bool enabled);
+    void setHumanizerEnabled(bool enabled);
+    bool screenOff() const { return m_screenOff; }
+    bool audioEnabled() const { return m_audioEnabled; }
+    bool humanizerEnabled() const { return m_humanizerEnabled; }
     void beginCalibration();
     void endCalibration();
     qint64 pollCalibratedCounts();
@@ -125,6 +130,7 @@ private:
     void handleStreamClosed(const QString &source, const QString &reason);
     void handleSprintKey(bool down);
     void resetSprint();
+    void loadGlobalSettings();
 
     AdbProcess m_adb;
     ScrcpyClient m_client;
@@ -174,6 +180,9 @@ private:
     QTimer m_reconnectTimer;
     QTimer m_frameFlushTimer; ///< 流静止时把环形回读里滞留的最后一帧取出来
     bool m_screenOff = false;
+    bool m_audioEnabled = true;
+    bool m_humanizerEnabled = false;
+    bool m_globalSettingsLoaded = false;
     int m_summonKey = 0x12; ///< VK_MENU
     bool m_summonDown = false;
     int m_sprintKey = 0x10; ///< VK_SHIFT

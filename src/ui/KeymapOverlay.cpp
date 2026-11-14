@@ -15,7 +15,6 @@ namespace ks::ui {
 namespace {
 
 constexpr double kDimAlpha = 0.35;
-constexpr int kGridCells = 16;
 
 } // namespace
 
@@ -30,6 +29,8 @@ KeymapOverlay::KeymapOverlay(QWidget *parent) : QWidget(parent) {
 
 void KeymapOverlay::setProfile(const Profile &profile) {
     m_profile = profile;
+    m_profile.lookRadius = std::clamp(m_profile.lookRadius, 0.05, 0.45);
+    m_profile.lookCenter = clampNormalizedRegionCenter(m_profile.lookCenter, m_profile.lookRadius);
     update();
 }
 
@@ -40,16 +41,6 @@ void KeymapOverlay::setSelected(int index) {
 
 void KeymapOverlay::setSelectedRegion(Region region) {
     m_selectedRegion = region;
-    update();
-}
-
-void KeymapOverlay::setGridEnabled(bool enabled) {
-    m_grid = enabled;
-    update();
-}
-
-void KeymapOverlay::setSnapEnabled(bool enabled) {
-    m_snap = enabled;
     update();
 }
 
@@ -115,9 +106,10 @@ double KeymapOverlay::regionRadius(int region) const {
 
 void KeymapOverlay::setRegionCenter(int region, const QPointF &normalized) {
     if (region == static_cast<int>(Region::Look)) {
-        m_profile.lookCenter = normalized;
+        m_profile.lookCenter = clampNormalizedRegionCenter(normalized, m_profile.lookRadius);
     } else if (region == static_cast<int>(Region::Joystick)) {
-        m_profile.joystickCenter = normalized;
+        m_profile.joystickCenter = QPointF(std::clamp(normalized.x(), 0.0, 1.0),
+                                           std::clamp(normalized.y(), 0.0, 1.0));
     }
 }
 
@@ -144,19 +136,6 @@ void KeymapOverlay::paintEvent(QPaintEvent *event) {
 
     // 压暗画面，保证键位与文字可读
     painter.fillRect(rect(), QColor(0, 0, 0, static_cast<int>(kDimAlpha * 255)));
-
-    // 网格
-    if (m_grid) {
-        QColor grid = Theme::color(QStringLiteral("border-subtle"));
-        grid.setAlpha(102);
-        painter.setPen(QPen(grid, 1));
-        for (int i = 1; i < kGridCells; ++i) {
-            const double x = width() * i / static_cast<double>(kGridCells);
-            const double y = height() * i / static_cast<double>(kGridCells);
-            painter.drawLine(QPointF(x, 0), QPointF(x, height()));
-            painter.drawLine(QPointF(0, y), QPointF(width(), y));
-        }
-    }
 
     // 视角触发区
     const QPointF lookCenter = toWidget(m_profile.lookCenter);
@@ -308,8 +287,6 @@ void KeymapOverlay::mouseMoveEvent(QMouseEvent *event) {
     }
     const int region = static_cast<int>(m_selectedRegion);
     QPointF center = toNormalized(event->pos()) + m_regionDragOffset;
-    center.setX(std::clamp(center.x(), 0.0, 1.0));
-    center.setY(std::clamp(center.y(), 0.0, 1.0));
     setRegionCenter(region, center);
     update();
     emit regionMoved(region);
@@ -323,12 +300,6 @@ void KeymapOverlay::mouseReleaseEvent(QMouseEvent *event) {
         m_draggingRegion = false;
         const int region = static_cast<int>(m_selectedRegion);
         QPointF center = regionCenter(region);
-        if (m_snap) {
-            center.setX(std::round(center.x() * 32.0) / 32.0);
-            center.setY(std::round(center.y() * 32.0) / 32.0);
-        }
-        center.setX(std::clamp(center.x(), 0.0, 1.0));
-        center.setY(std::clamp(center.y(), 0.0, 1.0));
         setRegionCenter(region, center);
         update();
         emit regionMoved(region);
@@ -343,10 +314,6 @@ void KeymapOverlay::mouseReleaseEvent(QMouseEvent *event) {
         return;
     }
     KeyBinding &binding = m_profile.bindings[m_selected];
-    if (m_snap) {
-        binding.center.setX(std::round(binding.center.x() * 32.0) / 32.0);
-        binding.center.setY(std::round(binding.center.y() * 32.0) / 32.0);
-    }
     binding.center.setX(std::clamp(binding.center.x(), 0.0, 1.0));
     binding.center.setY(std::clamp(binding.center.y(), 0.0, 1.0));
     update();
