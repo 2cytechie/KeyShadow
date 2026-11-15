@@ -1,5 +1,11 @@
 #include <QCoreApplication>
+#include "core/video/RenderPolicy.h"
 #include <QStandardPaths>
+#include <QTemporaryDir>
+#include <QEventLoop>
+#include <QTimer>
+#include "core/video/VideoOptions.h"
+#include "core/video/VideoColor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,6 +19,7 @@
 #include "core/engine/Engines.h"
 #include "core/profile/ProfileStore.h"
 #include "core/scrcpy/Protocol.h"
+#include "core/scrcpy/ScrcpyClient.h"
 #include "license/LicenseVerifier.h"
 
 namespace {
@@ -780,10 +787,14 @@ void testCalibrator() {
 
 // ---------------------------------------------------------------------------
 void testProfileStore() {
-    ks::ProfileStore store;
+    QTemporaryDir directory;
+    ks::ProfileStore store(directory.path());
     ks::Profile profile = ks::ProfileStore::makeDefaultProfile();
     profile.name = QStringLiteral("测试方案");
     profile.brightness = 12;
+    profile.videoShortEdge = 1080;
+    profile.maxFps = 120;
+    profile.videoBitRate = 48'000'000;
     profile.lookCountsPer180 = 1234.0;
     profile.bindings.first().center = QPointF(0.25, 0.35);
 
@@ -794,6 +805,8 @@ void testProfileStore() {
     const ks::Profile loaded = store.load(QStringLiteral("测试方案"), &ok);
     check(ok, "profile load");
     check(loaded.brightness == 12, "profile brightness roundtrip");
+    check(loaded.videoShortEdge == 1080 && loaded.maxFps == 120 &&
+          loaded.videoBitRate == 48'000'000, "video options roundtrip");
     check(std::abs(loaded.lookCountsPer180 - 1234.0) < 0.001, "profile sensitivity roundtrip");
     check(loaded.bindings.size() == profile.bindings.size(), "profile bindings roundtrip");
     check(std::abs(loaded.bindings.first().center.x() - 0.25) < 0.001,
@@ -821,6 +834,115 @@ void testDefaultProfile() {
     check(!profile.humanizerEnabled, "humanizer is disabled by default");
 }
 
+void testVideoOptions() {
+    ks::Profile p;
+    p.videoShortEdge = 1080;
+    check(ks::streamMaxSize(p, 1440, 3200) == 2400, "K60 1080p short edge produces 2400 long edge");
+    check(ks::streamMaxSize(p, 3200, 1440) == 2400, "rotation keeps resolution limit");
+    check(ks::streamMaxSize(p, 1080, 1920) == 1920, "16:9 1080p produces 1920 long edge");
+    check(ks::streamMaxSize(p, 720, 1600) == 1600, "resolution presets never upscale source");
+    p.videoShortEdge = 0;
+    check(ks::streamMaxSize(p, 1440, 3200) == 0, "native stream has no size limit");
+    p.maxFps = 120;
+    ks::normalizeVideoOptions(p, true);
+    check(p.videoShortEdge == 0 && p.maxFps == 120, "Pro preserves native 120 fps target");
+    ks::normalizeVideoOptions(p, false);
+    check(p.videoShortEdge == 1080 && p.maxFps == 60, "basic clamps imported Pro video settings");
+    p.videoShortEdge = -1; p.maxFps = 10000; p.videoBitRate = -1;
+    ks::normalizeVideoOptions(p, false);
+    check(p.videoShortEdge == 1080 && p.maxFps == 60 && p.videoBitRate == 1'000'000,
+          "invalid imported video settings are bounded");
+    for (auto space : {ks::VideoColorSpace::Bt601, ks::VideoColorSpace::Bt709,
+                       ks::VideoColorSpace::Bt2020}) {
+        const auto m = ks::yuvToRgbMatrix(space, false);
+        const auto black = ks::yuvOffset(false) + QVector3D(16/255.f, 128/255.f, 128/255.f);
+        check(black.length() < 1e-6f && std::abs(m(0,0)*(235-16)/255.f-1) < 1e-6f,
+              "limited-range neutral black and white preserve endpoints");
+    }
+    const auto m = ks::yuvToRgbMatrix(ks::VideoColorSpace::Bt709, false);
+    check(std::abs(m(0,2)-1.79274f) < 0.001f, "limited-range BT709 scales chroma correctly");
+    check(ks::videoCodecForMode(false, QStringLiteral("h265")) == QStringLiteral("h264"),
+          "frame priority always uses H264 even when quality prefers HEVC");
+    check(ks::videoCodecForMode(true, QStringLiteral("h265")) == QStringLiteral("h265"),
+          "quality priority can request HEVC");
+    check(ks::videoCodecForMode(true, QStringLiteral("h265"), true) == QStringLiteral("h264") &&
+          ks::videoCodecForMode(true, QStringLiteral("h265;invalid")) == QStringLiteral("h264"),
+          "fallback and invalid codec values use safe H264");
+}
+
+void testRenderBudget() {
+    using Filter = ks::VideoScaleFilter;
+    auto decision = ks::videoRenderDecision(false, 100.0f, 0, false);
+    check(decision.filter == Filter::FastCubic && decision.sharpness == 25.0f,
+          "frame priority uses fast cubic with gentle CAS");
+    decision = ks::videoRenderDecision(false, 100.0f, 1, false);
+    check(decision.filter == Filter::FastCubic && decision.sharpness == 10.0f,
+          "first protection step reduces sharpening before scaling");
+    decision = ks::videoRenderDecision(false, 100.0f, 2, false);
+    check(decision.filter == Filter::FastCubic && decision.sharpness == 0.0f,
+          "second protection step pauses CAS while keeping cubic scaling");
+    decision = ks::videoRenderDecision(false, 100.0f, 3, false);
+    check(decision.filter == Filter::Linear && decision.sharpness == 0.0f,
+          "last protection step uses light scaling without touching source size");
+    decision = ks::videoRenderDecision(true, 100.0f, 3, false);
+    check(decision.filter == Filter::QualityCubic && decision.sharpness == 100.0f,
+          "quality priority retains requested scaling and sharpening");
+    decision = ks::videoRenderDecision(true, 100.0f, 0, true);
+    check(decision.filter == Filter::Linear && decision.sharpness == 0.0f &&
+          ks::videoRenderDecision(false, 0.0f, 0, false).sharpness == 0.0f,
+          "original comparison and explicit zero sharpening remain real bypasses");
+
+    ks::FrameBudgetController budget;
+    qint64 time = 0;
+    budget.observe(1.0, 1000.0/120, time);
+    auto windows = [&](double ms, int count) {
+        for (int w=0; w<count; ++w) for (int i=0; i<10; ++i) {
+            time += 50;
+            budget.observe(ms, 1000.0/120, time);
+        }
+    };
+    windows(10.0, 1);
+    check(budget.degradation() == 0, "one slow window does not trigger quality oscillation");
+    windows(10.0, 1);
+    check(budget.degradation() == 1, "sustained measured overload starts with gentle protection");
+    windows(10.0, 4);
+    check(budget.degradation() == 3, "sustained overload advances through all protection steps");
+    windows(1.0, 5);
+    check(budget.degradation() == 3, "recovery waits for sustained spare processing capacity");
+    windows(1.0, 1);
+    check(budget.degradation() == 2, "recovery restores one step instead of immediately enabling everything");
+    time += 5000;
+    budget.observe(1.0, 1000.0/120, time);
+    check(budget.degradation() == 2, "idle periods are not treated as extra processing capacity");
+    budget.reset();
+    windows(1.0, 10);
+    check(budget.degradation() == 0, "cheap processing never degrades when no FPS inference is supplied");
+}
+
+void testConnectionCallbacks() {
+    ks::ScrcpyClient client;
+    ks::ScrcpyConfig config;
+    QTemporaryDir directory;
+    config.serial = QStringLiteral("keyshadow-test-no-device");
+    config.serverJarPath = directory.filePath("missing-server.jar");
+    int failures = 0;
+    QEventLoop loop;
+    QObject::connect(&client, &ks::ScrcpyClient::failed, &loop,
+                     [&](const QString &) { ++failures; loop.quit(); });
+    client.start(config);
+    client.stop(); // joins the worker, whose failure can still be queued
+    QCoreApplication::processEvents();
+    check(failures == 0, "stopped connection cannot deliver a stale failure to the next mode");
+    client.start(config);
+    QTimer deadline;
+    deadline.setSingleShot(true);
+    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+    deadline.start(2000);
+    loop.exec();
+    check(failures == 1, "a current connection still delivers its own failure");
+    client.stop();
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -846,6 +968,9 @@ int main(int argc, char *argv[]) {
     testLicenseVerifier();
     testProfileStore();
     testDefaultProfile();
+    testVideoOptions();
+    testRenderBudget();
+    testConnectionCallbacks();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -19,6 +19,7 @@
 #include "license/LicenseManager.h"
 #include "ui/MainWindow.h"
 #include "ui/Theme.h"
+#include "ui/VideoPresentationSettings.h"
 
 namespace {
 
@@ -130,13 +131,14 @@ int main(int argc, char *argv[]) {
     qInstallMessageHandler(messageHandler);
     writeRawLog("---- KeyShadow starting ----\n");
 
-    // 关闭垂直同步：QOpenGLWidget 的呈现默认会阻塞到下一个刷新周期（最长 ~16.7ms），
-    // 而键鼠原始输入（WM_INPUT）恰好也在 GUI 线程分发，那段阻塞会直接叠加成输入延迟。
-    // 代价是可能撕裂；本工具以延迟优先。必须在 QApplication 构造前设置。
-    QSurfaceFormat surfaceFormat = QSurfaceFormat::defaultFormat();
-    surfaceFormat.setSwapInterval(0);
-    surfaceFormat.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
-    QSurfaceFormat::setDefaultFormat(surfaceFormat);
+    // 在创建任何窗口前读取全局垂直同步选项；设置页修改后下次启动生效。
+    // 仅同步呈现；视频线程独立解码，FPS 仍统计成功解码的帧数。
+    // GUI 等待刷新时由最新帧槽合并投递，不累积待显示的旧帧。
+    {
+        // QApplication 尚未构造，显式指定与下方应用标识一致的设置位置。
+        const QSettings settings(QStringLiteral("KeyShadow"), QStringLiteral("KeyShadow"));
+        QSurfaceFormat::setDefaultFormat(ks::ui::videoPresentationFormat(settings));
+    }
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("KeyShadow"));

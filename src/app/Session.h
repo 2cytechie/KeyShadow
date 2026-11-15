@@ -27,7 +27,7 @@ public:
     Q_ENUM(State)
 
     struct Stats {
-        double fps = 0.0;            ///< 实际转换并显示出去的帧率
+        double fps = 0.0;            ///< avcodec_receive_frame 成功输出的解码帧率（包含跳过呈现的帧）
         double skippedFps = 0.0;     ///< 为压低延迟而跳过转换的帧率
         double decodeMs = 0.0;
         double inputLatencyMs = -1.0; ///< 系统采集 → 触控指令发出（含 GUI 线程排队）
@@ -41,7 +41,7 @@ public:
         bool audioEnabled = false;
     };
 
-    explicit Session(QObject *parent = nullptr);
+    explicit Session(QObject *parent = nullptr, const QString &profileDirectory = {});
     ~Session() override;
 
     void refreshDevices();
@@ -92,6 +92,15 @@ public:
     bool screenOff() const { return m_screenOff; }
     bool audioEnabled() const { return m_audioEnabled; }
     bool humanizerEnabled() const { return m_humanizerEnabled; }
+    bool qualityPriority() const { return m_qualityPriority; }
+    void setQualityPriority(bool enabled);
+    QString qualityCodec() const { return m_qualityCodec; }
+    void setQualityCodec(const QString &codec);
+    void retryQualityCodec();
+    QString videoNotice() const { return m_videoNotice; }
+    bool codecFallbackActive() const { return m_forceH264; }
+    void disableGpuFrames();
+    void refreshLicense();
     void beginCalibration();
     void endCalibration();
     qint64 pollCalibratedCounts();
@@ -113,6 +122,7 @@ signals:
     void summonKeyPressed(bool down);
     void sprintToggled(bool active);
     void screenOffChanged(bool off);
+    void videoOptionsChanged();
 
 private:
     void setState(State state, const QString &message);
@@ -132,6 +142,11 @@ private:
     void handleSprintKey(bool down);
     void resetSprint();
     void loadGlobalSettings();
+    Profile injectionProfile() const;
+    void startConnection(const QString &serial, bool resetCodecFallback);
+    void requestCodecFallback(const QString &reason);
+    void setVideoNotice(const QString &notice);
+    void applyCodecPreference();
 
     AdbProcess m_adb;
     ScrcpyClient m_client;
@@ -149,6 +164,11 @@ private:
     std::atomic<qint64> m_lastFramePostMs{0};
     /// 本次连接的帧率上限快照（供读线程判断是否提示软解跟不上，避免跨线程读 m_profile）。
     std::atomic<int> m_streamMaxFps{60};
+    std::atomic<bool> m_streamHevc{false};
+    std::atomic<quint64> m_streamGeneration{0};
+    std::atomic<bool> m_firstVideoFrame{false};
+    std::atomic<bool> m_codecFallbackQueued{false};
+    int m_streamShortEdge = 1080; ///< active connection snapshot, GUI thread only
     AudioDecoder m_audioDecoder;
     AudioPlayer m_audioPlayer;
     InjectionThread m_injection;
@@ -173,16 +193,20 @@ private:
     mutable std::mutex m_statsMutex;
     Stats m_stats;
     QTimer m_statsTimer;
-    std::atomic<qint64> m_frameCounter{0};
     std::atomic<qint64> m_byteCounter{0};
     qint64 m_lastStatsTickMs = 0;
     std::atomic<double> m_decodeAccumMs{0.0};
     std::atomic<qint64> m_decodeSamples{0};
     QTimer m_reconnectTimer;
     QTimer m_frameFlushTimer; ///< 流静止时把环形回读里滞留的最后一帧取出来
+    QTimer m_firstFrameTimer;
     bool m_screenOff = false;
     bool m_audioEnabled = true;
     bool m_humanizerEnabled = false;
+    bool m_qualityPriority = false;
+    QString m_qualityCodec = QStringLiteral("h264");
+    QString m_videoNotice;
+    bool m_forceH264 = false;
     bool m_globalSettingsLoaded = false;
     int m_summonKey = 0x12; ///< VK_MENU
     bool m_summonDown = false;

@@ -17,8 +17,10 @@ struct ID3D11Texture2D;
 
 namespace ks {
 
+class GpuFrameConverter;
+
 /// 视频解码器：优先 D3D11VA 硬解（RTX 显卡走 NVDEC），失败自动降级软解。
-/// 输出统一为 YUV420P 的 VideoFrame，供 OpenGL 渲染器上传纹理。
+/// 可输出 GPU BGRA 纹理；不可用时输出 YUV420P 平面。
 class VideoDecoder {
 public:
     using FrameCallback = std::function<void(const VideoFramePtr &)>;
@@ -49,6 +51,11 @@ public:
 
     /// 取走并清零被跳过的解码帧数（convertAllowed=false 造成的）。
     qint64 takeSkippedFrames() { return m_skippedFrames.exchange(0); }
+    qint64 takeDecodedFrames() { return m_decodedFrames.exchange(0); }
+    void setGpuFramesEnabled(bool enabled) { m_gpuFramesEnabled.store(enabled); }
+    /// Recover the last decoded source immediately when GL sharing fails, even
+    /// if a static phone screen will not produce another video packet.
+    void disableGpuFramesAndRecover(const FrameCallback &callback);
 
     /// 环形回读：是否有已拷贝、尚未转换发出的帧。
     bool hasPendingFrame() const { return m_pendingAtMs.load(std::memory_order_relaxed) >= 0; }
@@ -84,6 +91,7 @@ private:
     AVBufferRef *m_hwDeviceCtx = nullptr;
     AVFrame *m_frame = nullptr;
     AVFrame *m_swFrame = nullptr;
+    AVFrame *m_lastGpuSource = nullptr;
     AVPacket *m_packet = nullptr;
     SwsContext *m_sws = nullptr;
     int m_swsWidth = 0;
@@ -109,7 +117,13 @@ private:
     std::atomic<qint64> m_pendingAtMs{-1};
     bool m_deferReadback = true;
     bool m_deferFailed = false;
+    std::atomic<bool> m_gpuFramesEnabled{false};
+    std::unique_ptr<GpuFrameConverter> m_gpuConverter;
+    bool m_gpuFailed = false;
+    VideoColorSpace m_pendingColorSpace = VideoColorSpace::Bt709;
+    bool m_pendingFullRange = false;
     std::atomic<qint64> m_skippedFrames{0};
+    std::atomic<qint64> m_decodedFrames{0};
     QString m_codecName;
     QString m_error;
     QByteArray m_extradata;

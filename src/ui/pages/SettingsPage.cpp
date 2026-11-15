@@ -5,6 +5,8 @@
 #include "ui/KeyNames.h"
 #include "ui/LicenseDialog.h"
 #include "ui/Theme.h"
+#include "ui/VideoOptionsUi.h"
+#include "ui/VideoPresentationSettings.h"
 
 #include <QApplication>
 #include <QButtonGroup>
@@ -48,8 +50,7 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     // 视频
     QWidget *videoSection = buildSection(QStringLiteral("视频"));
     m_resolutionCombo = new QComboBox(videoSection);
-    m_resolutionCombo->addItems({QStringLiteral("原生分辨率 · PRO"), QStringLiteral("1080p"),
-                                 QStringLiteral("720p"), QStringLiteral("480p")});
+    populateResolutions(m_resolutionCombo);
     addRow(videoSection, QStringLiteral("默认分辨率"), m_resolutionCombo);
 
     m_fpsCombo = new QComboBox(videoSection);
@@ -58,10 +59,41 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     addRow(videoSection, QStringLiteral("默认帧率"), m_fpsCombo);
 
     m_bitrateCombo = new QComboBox(videoSection);
-    m_bitrateCombo->addItems({QStringLiteral("4 Mbps"), QStringLiteral("8 Mbps"),
-                              QStringLiteral("12 Mbps"), QStringLiteral("16 Mbps"),
-                              QStringLiteral("24 Mbps"), QStringLiteral("32 Mbps")});
+    populateBitrates(m_bitrateCombo);
     addRow(videoSection, QStringLiteral("码率上限"), m_bitrateCombo);
+
+    m_renderModeCombo = new QComboBox(videoSection);
+    m_renderModeCombo->addItems({QStringLiteral("帧率优先"), QStringLiteral("画质优先")});
+    m_renderModeCombo->setToolTip(QStringLiteral("帧率优先使用快速双三次缩放，CAS 上限 25%，超出处理预算时逐步减弱增强；画质优先保留高质量缩放和所选锐化强度。均保留分辨率和帧率目标。"));
+    addRow(videoSection, QStringLiteral("投屏模式"), m_renderModeCombo);
+
+    m_qualityCodecCombo = new QComboBox(videoSection);
+    m_qualityCodecCombo->setObjectName(QStringLiteral("QualityCodecCombo"));
+    m_qualityCodecCombo->addItem(QStringLiteral("H.264（默认，低延迟）"), QStringLiteral("h264"));
+    m_qualityCodecCombo->addItem(QStringLiteral("H.265（试用，连接后验证）"), QStringLiteral("h265"));
+    addRow(videoSection, QStringLiteral("画质优先编码"), m_qualityCodecCombo);
+    auto *codecHint = new QLabel(QStringLiteral(
+        "帧率优先固定使用 H.264。画质优先可试用 H.265；连接或硬解验证失败时回退 H.264，并保留分辨率、码率和帧率目标。"), videoSection);
+    codecHint->setWordWrap(true);
+    codecHint->setProperty("variant", "micro");
+    addRow(videoSection, QString(), codecHint);
+    m_codecStatus = new QLabel(videoSection);
+    m_codecStatus->setWordWrap(true);
+    m_codecStatus->setProperty("variant", "micro");
+    addRow(videoSection, QStringLiteral("编码状态"), m_codecStatus);
+    m_retryCodecButton = new QPushButton(QStringLiteral("重试 H.265"), videoSection);
+    addRow(videoSection, QString(), m_retryCodecButton);
+
+    m_verticalSyncCheck =
+        new QCheckBox(QStringLiteral("开启垂直同步（重启软件后生效）"), videoSection);
+    m_verticalSyncCheck->setObjectName(QStringLiteral("VerticalSyncCheck"));
+    addRow(videoSection, QStringLiteral("垂直同步"), m_verticalSyncCheck);
+    auto *verticalSyncHint = new QLabel(
+        QStringLiteral("开启可减少画面撕裂；关闭可降低显示延迟，但可能出现撕裂。FPS 按解码帧数统计。"),
+        videoSection);
+    verticalSyncHint->setProperty("variant", "micro");
+    verticalSyncHint->setWordWrap(true);
+    addRow(videoSection, QString(), verticalSyncHint);
 
     m_screenOffCheck = new QCheckBox(QStringLiteral("开启息屏投屏（Pro）"), videoSection);
     addRow(videoSection, QStringLiteral("息屏投屏"), m_screenOffCheck);
@@ -212,13 +244,7 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
                 }
                 // 原生分辨率为付费功能：未激活时回退到方案当前值。
                 if (index == 0 && !LicenseManager::instance().isPro()) {
-                    const int maxSize = m_session->profile().maxSize;
-                    m_syncing = true;
-                    m_resolutionCombo->setCurrentIndex(maxSize >= 1080   ? 1
-                                                       : maxSize >= 720 ? 2
-                                                       : maxSize >= 480 ? 3
-                                                                        : 1);
-                    m_syncing = false;
+                    syncResolution(m_resolutionCombo, m_session->profile());
                     QMessageBox::information(this, QStringLiteral("付费功能"),
                                              QStringLiteral("原生分辨率为付费功能，激活后解锁。"));
                     return;
@@ -241,6 +267,19 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
             });
     connect(m_bitrateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int) { storeProfile(); });
+    connect(m_renderModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int index) { if (!m_syncing) m_session->setQualityPriority(index == 1); });
+    connect(m_qualityCodecCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int) {
+                if (!m_syncing) m_session->setQualityCodec(m_qualityCodecCombo->currentData().toString());
+            });
+    connect(m_retryCodecButton, &QPushButton::clicked, m_session, &Session::retryQualityCodec);
+    connect(m_session, &Session::videoOptionsChanged, this, &SettingsPage::syncFromProfile);
+    connect(m_verticalSyncCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_syncing) return;
+        QSettings settings;
+        setVerticalSyncEnabled(settings, checked);
+    });
     connect(m_screenOffCheck, &QCheckBox::toggled, this, [this](bool checked) {
         if (m_syncing) {
             return;
@@ -296,11 +335,11 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     connect(activateButton, &QPushButton::clicked, this, [this] {
         LicenseDialog dialog(this);
         connect(&dialog, &LicenseDialog::licenseChanged, this, [this] {
-            syncFromProfile();
             if (m_session) {
                 // 激活后按新授权重算注入侧的拟人化/帧率门控，无需用户再操作。
-                m_session->applyProfile(m_session->profile(), false);
+                m_session->refreshLicense();
             }
+            syncFromProfile();
             emit licenseChanged();
         });
         dialog.exec();
@@ -530,23 +569,20 @@ void SettingsPage::syncFromProfile() {
     m_syncing = true;
     const Profile &profile = m_session->profile();
 
-    int resolutionIndex = profile.maxSize >= 1080 ? 1
-                        : profile.maxSize >= 720 ? 2
-                        : profile.maxSize >= 480 ? 3
-                                                 : 0;
-    if (resolutionIndex == 0 && !LicenseManager::instance().isPro()) {
-        resolutionIndex = 1; // 原生分辨率为付费功能
-    }
-    m_resolutionCombo->setCurrentIndex(resolutionIndex);
+    syncResolution(m_resolutionCombo, profile);
+    m_renderModeCombo->setCurrentIndex(m_session->qualityPriority() ? 1 : 0);
+    m_qualityCodecCombo->setCurrentIndex(m_qualityCodecCombo->findData(m_session->qualityCodec()));
+    m_qualityCodecCombo->setEnabled(m_session->qualityPriority());
+    m_codecStatus->setText(m_session->videoNotice().isEmpty()
+                              ? QStringLiteral("默认使用 H.264；H.265 需要在当前设备连接后验证。")
+                              : m_session->videoNotice());
+    m_retryCodecButton->setVisible(m_session->qualityPriority() && m_session->codecFallbackActive());
+    m_verticalSyncCheck->setChecked(verticalSyncEnabled(QSettings()));
     m_fpsCombo->setCurrentIndex(profile.maxFps >= 120 ? 3
                               : profile.maxFps >= 90 ? 2
                               : profile.maxFps >= 60 ? 1
                                                      : 0);
-    const int mbps = std::max(1, profile.videoBitRate / 1'000'000);
-    m_bitrateCombo->setCurrentIndex(mbps <= 4 ? 0 : mbps <= 8 ? 1 : mbps <= 12 ? 2
-                                                                : mbps <= 16 ? 3
-                                                                : mbps <= 24 ? 4
-                                                                             : 5);
+    syncBitrate(m_bitrateCombo, profile.videoBitRate);
     m_audioCheck->setChecked(m_session->audioEnabled());
     m_screenOffCheck->setChecked(m_session->screenOff());
     m_statsOverlayCheck->setChecked(
@@ -582,13 +618,14 @@ void SettingsPage::storeProfile() {
         return;
     }
     Profile profile = m_session->profile();
-    static const int resolutions[] = {0, 1080, 720, 480};
     static const int fpsValues[] = {30, 60, 90, 120};
-    static const int bitrates[] = {4, 8, 12, 16, 24, 32};
-    profile.maxSize = resolutions[std::clamp(m_resolutionCombo->currentIndex(), 0, 3)];
+    readResolution(m_resolutionCombo, profile);
     profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 3)];
-    profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 5)] * 1'000'000;
+    profile.videoBitRate = m_bitrateCombo->currentData().toInt();
     m_session->applyProfile(profile, true);
+    if (m_session->state() == Session::State::Streaming && !m_session->connectedSerial().isEmpty()) {
+        m_session->connectDevice(m_session->connectedSerial());
+    }
 }
 
 } // namespace ks::ui

@@ -16,7 +16,7 @@ class Session;
 
 namespace ks::ui {
 
-/// 设置页：视频 / 音频 / 输入 / 关于，修改即时生效并自动保存。
+/// 设置页：修改自动保存；垂直同步重启后生效，其余选项即时应用。
 class SettingsPage : public QWidget {
     Q_OBJECT
 
@@ -53,7 +53,12 @@ private:
     QComboBox *m_resolutionCombo = nullptr;
     QComboBox *m_fpsCombo = nullptr;
     QComboBox *m_bitrateCombo = nullptr;
+    QComboBox *m_renderModeCombo = nullptr;
+    QComboBox *m_qualityCodecCombo = nullptr;
+    QPushButton *m_retryCodecButton = nullptr;
+    QLabel *m_codecStatus = nullptr;
     QCheckBox *m_audioCheck = nullptr;
+    QCheckBox *m_verticalSyncCheck = nullptr;
     QCheckBox *m_screenOffCheck = nullptr;
     QCheckBox *m_statsOverlayCheck = nullptr;
     QCheckBox *m_humanizerCheck = nullptr;

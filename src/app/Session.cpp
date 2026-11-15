@@ -9,16 +9,21 @@
 
 #include "core/scrcpy/Protocol.h"
 #include "core/video/VideoFrame.h"
+#include "core/video/VideoOptions.h"
 #include "license/LicenseManager.h"
 
 #include <QDebug>
 
 namespace ks {
 
-Session::Session(QObject *parent) : QObject(parent) {
+Session::Session(QObject *parent, const QString &profileDirectory)
+    : QObject(parent), m_store(profileDirectory) {
     m_profile = ProfileStore::makeDefaultProfile();
     reloadProfiles();
     loadGlobalSettings();
+    m_qualityPriority = QSettings().value(QStringLiteral("video/qualityPriority"), false).toBool();
+    m_qualityCodec = videoCodecForMode(true,
+        QSettings().value(QStringLiteral("video/qualityCodec"), QStringLiteral("h264")).toString());
     applyProfile(m_profile, false);
 
     QSettings settings;
@@ -40,6 +45,10 @@ Session::Session(QObject *parent) : QObject(parent) {
         }
     });
     connect(&m_client, &ScrcpyClient::failed, this, [this](const QString &reason) {
+        if (m_streamHevc.load() && !m_stopping) {
+            requestCodecFallback(QStringLiteral("H.265 建立连接失败：%1").arg(reason));
+            return;
+        }
         handleStreamClosed(QStringLiteral("连接"), reason);
     });
     connect(&m_client, &ScrcpyClient::channelsReady, this,
@@ -49,6 +58,7 @@ Session::Session(QObject *parent) : QObject(parent) {
                 m_client.detachSockets();
                 m_stopping = false;
                 m_audioConfigured = false;
+                if (m_streamHevc.load() && !m_firstVideoFrame.load()) m_firstFrameTimer.start();
 
                 // 视频通道
                 m_videoReader = std::make_unique<ScrcpyStreamReader>();
@@ -93,7 +103,7 @@ Session::Session(QObject *parent) : QObject(parent) {
                 if (!m_injection.start(controlSocket, m_screenWidth, m_screenHeight, &error)) {
                     emit logMessage(QStringLiteral("输入注入启动失败：%1").arg(error));
                 }
-                m_injection.setProfile(m_profile);
+                m_injection.setProfile(injectionProfile());
 
                 if (m_screenOff) {
                     m_injection.sendMessage(proto::displayPower(false));
@@ -115,6 +125,13 @@ Session::Session(QObject *parent) : QObject(parent) {
     m_reconnectTimer.setSingleShot(true);
     m_reconnectTimer.setInterval(1200);
     connect(&m_reconnectTimer, &QTimer::timeout, this, &Session::tryReconnect);
+
+    m_firstFrameTimer.setSingleShot(true);
+    m_firstFrameTimer.setInterval(10000);
+    connect(&m_firstFrameTimer, &QTimer::timeout, this, [this] {
+        if (!m_firstVideoFrame.load())
+            requestCodecFallback(QStringLiteral("H.265 在 10 秒内未输出可显示的硬解帧"));
+    });
 
     // 环形回读会把每帧推迟一拍发射。画面静止后不再有新包，最后一帧会一直躺在槽里，
     // 所以这里兜底：待处理帧超过阈值还没发，就主动取出来显示。
@@ -190,6 +207,10 @@ QString Session::ensureServerJar() {
 }
 
 void Session::connectDevice(const QString &serial) {
+    startConnection(serial, true);
+}
+
+void Session::startConnection(const QString &serial, bool resetCodecFallback) {
     if (m_state == State::Connecting || m_state == State::Streaming) {
         disconnectDevice();
     } else {
@@ -207,6 +228,11 @@ void Session::connectDevice(const QString &serial) {
     m_serial = serial;
     m_stopping = false;
     m_reconnectAttempts = 0;
+    if (resetCodecFallback) m_forceH264 = false;
+    {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+        m_stats = Stats{};
+    }
 
     int width = 0;
     int height = 0;
@@ -219,10 +245,20 @@ void Session::connectDevice(const QString &serial) {
     config.serial = serial;
     config.adbPath = m_adb.adbPath();
     config.serverJarPath = ensureServerJar();
+    normalizeVideoOptions(m_profile, LicenseManager::instance().isPro());
     m_streamMaxFps.store(m_profile.maxFps);
+    m_streamShortEdge = m_profile.videoShortEdge;
     config.videoBitRate = m_profile.videoBitRate;
     config.maxFps = m_profile.maxFps;
-    config.maxSize = m_profile.maxSize;
+    config.maxSize = streamMaxSize(m_profile, m_screenWidth, m_screenHeight);
+    config.videoCodec = videoCodecForMode(m_qualityPriority, m_qualityCodec, m_forceH264);
+    m_streamHevc.store(config.videoCodec == QStringLiteral("h265"));
+    if (!m_forceH264)
+        setVideoNotice(m_streamHevc.load()
+            ? QStringLiteral("H.265 试播中：正在验证设备编码与本机硬解，失败将回退 H.264。")
+            : QStringLiteral("H.264 低延迟路径"));
+    m_videoDecoder.setGpuFramesEnabled(
+        qEnvironmentVariableIntValue("KEYSHADOW_DISABLE_GPU_SHARING") != 1);
     config.audio = m_audioEnabled;
 
     if (config.serverJarPath.isEmpty()) {
@@ -233,11 +269,14 @@ void Session::connectDevice(const QString &serial) {
     setState(State::Connecting, QStringLiteral("准备连接"));
     qInfo() << "connectDevice" << serial << "jar" << config.serverJarPath << "screen"
             << m_screenWidth << m_screenHeight << "fps" << config.maxFps << "bitrate"
-            << config.videoBitRate << "size" << config.maxSize << "audio" << config.audio;
+            << config.videoBitRate << "size" << config.maxSize << "codec" << config.videoCodec
+            << "audio" << config.audio;
     m_client.start(config);
 }
 
 void Session::stopStreams() {
+    m_streamGeneration.fetch_add(1);
+    m_firstFrameTimer.stop();
     m_statsTimer.stop();
     // 必须在停止读线程/关闭解码器之前停掉，避免与解码线程争用解码器。
     m_frameFlushTimer.stop();
@@ -260,10 +299,17 @@ void Session::stopStreams() {
     m_audioPlayer.stop();
     m_audioDecoder.close();
     m_videoDecoder.close();
-    m_frameCounter.store(0);
+    m_videoDecoder.takeDecodedFrames();
+    m_videoDecoder.takeSkippedFrames();
     m_byteCounter.store(0);
     m_decodeAccumMs.store(0.0);
     m_decodeSamples.store(0);
+    m_firstVideoFrame.store(false);
+    m_codecFallbackQueued.store(false);
+    {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+        m_stats = Stats{};
+    }
 }
 
 void Session::disconnectDevice() {
@@ -286,10 +332,15 @@ void Session::handleStreamClosed(const QString &source, const QString &reason) {
         return;
     }
     // 回调来自流读取线程：切回主线程再操作定时器与状态
+    const auto generation = m_streamGeneration.load();
     QMetaObject::invokeMethod(
         this,
-        [this, source, reason] {
-            if (m_stopping) {
+        [this, source, reason, generation] {
+            if (m_stopping || generation != m_streamGeneration.load()) {
+                return;
+            }
+            if (m_streamHevc.load()) {
+                requestCodecFallback(QStringLiteral("H.265 %1通道断开：%2").arg(source, reason));
                 return;
             }
             emit logMessage(QStringLiteral("%1通道断开：%2").arg(source, reason));
@@ -310,7 +361,7 @@ void Session::tryReconnect() {
     }
     stopStreams();
     m_client.stop();
-    connectDevice(m_serial);
+    startConnection(m_serial, false);
 }
 
 void Session::loadGlobalSettings() {
@@ -354,27 +405,21 @@ void Session::reloadProfiles() {
 
 void Session::applyProfile(const Profile &profile, bool persist) {
     m_profile = profile;
-    if (!LicenseManager::instance().isPro()) {
-        // 90/120fps 与原生分辨率为付费功能：未激活时统一钳制（导入方案/旧文件兜底）。
-        if (m_profile.maxFps > 60) {
-            m_profile.maxFps = 60;
-        }
-        if (m_profile.maxSize == 0) {
-            m_profile.maxSize = 1080;
-        }
-    }
+    const bool pro = LicenseManager::instance().isPro();
+    normalizeVideoOptions(m_profile, pro);
     if (m_globalSettingsLoaded) {
+        if (!pro && m_screenOff) setScreenOff(false);
+        if (!pro && m_humanizerEnabled) {
+            m_humanizerEnabled = false;
+            QSettings().setValue(QStringLiteral("input/humanizerEnabled"), false);
+        }
         // 音频、息屏和拟人化是全局设置，不随键位方案切换。
         m_profile.audioEnabled = m_audioEnabled;
         m_profile.screenOff = m_screenOff;
         m_profile.humanizerEnabled = m_humanizerEnabled;
     }
     // 拟人化为付费能力：授权只决定是否允许，实际开关由全局设置决定。
-    Profile injected = m_profile;
-    const bool pro = LicenseManager::instance().isPro();
-    injected.humanizerEnabled = pro && m_humanizerEnabled;
-    injected.proHumanizer = pro && m_humanizerEnabled;
-    m_injection.setProfile(injected);
+    m_injection.setProfile(injectionProfile());
     QSettings().setValue(QStringLiteral("profile/lastName"), m_profile.name);
     if (persist) {
         QString error;
@@ -383,6 +428,83 @@ void Session::applyProfile(const Profile &profile, bool persist) {
         }
     }
     emit profileChanged(m_profile);
+}
+
+Profile Session::injectionProfile() const {
+    Profile injected = m_profile;
+    injected.humanizerEnabled = LicenseManager::instance().isPro() && m_humanizerEnabled;
+    injected.proHumanizer = injected.humanizerEnabled;
+    return injected;
+}
+
+void Session::setQualityPriority(bool enabled) {
+    if (m_qualityPriority == enabled) return;
+    m_qualityPriority = enabled;
+    QSettings().setValue(QStringLiteral("video/qualityPriority"), enabled);
+    applyCodecPreference();
+    emit profileChanged(m_profile);
+}
+
+void Session::setQualityCodec(const QString &codec) {
+    const QString normalized = videoCodecForMode(true, codec);
+    if (m_qualityCodec == normalized) return;
+    m_qualityCodec = normalized;
+    QSettings().setValue(QStringLiteral("video/qualityCodec"), normalized);
+    applyCodecPreference();
+}
+
+void Session::retryQualityCodec() {
+    if (m_qualityPriority && m_qualityCodec == QStringLiteral("h265")) applyCodecPreference();
+}
+
+void Session::setVideoNotice(const QString &notice) {
+    if (m_videoNotice == notice) return;
+    m_videoNotice = notice;
+    emit logMessage(notice);
+    emit videoOptionsChanged();
+}
+
+void Session::applyCodecPreference() {
+    m_forceH264 = false;
+    const QString codec = videoCodecForMode(m_qualityPriority, m_qualityCodec);
+    setVideoNotice(codec == QStringLiteral("h265")
+                       ? QStringLiteral("已选择 H.265；连接后验证硬解首帧，失败回退 H.264。")
+                       : QStringLiteral("H.264 低延迟路径"));
+    emit videoOptionsChanged();
+    if ((m_state == State::Streaming || m_state == State::Connecting) &&
+        (m_streamHevc.load() != (codec == QStringLiteral("h265")))) {
+        const QString serial = m_serial;
+        startConnection(serial, true);
+    }
+}
+
+void Session::requestCodecFallback(const QString &reason) {
+    if (!m_streamHevc.load() || m_codecFallbackQueued.exchange(true)) return;
+    const auto generation = m_streamGeneration.load();
+    QMetaObject::invokeMethod(this, [this, reason, generation] {
+        if (m_stopping || generation != m_streamGeneration.load()) return;
+        m_forceH264 = true;
+        setVideoNotice(QStringLiteral("%1。已回退 H.264；分辨率、码率和帧率目标保持不变。").arg(reason));
+        const QString serial = m_serial;
+        startConnection(serial, false);
+    }, Qt::QueuedConnection);
+}
+
+void Session::disableGpuFrames() {
+    m_videoDecoder.disableGpuFramesAndRecover(
+        [this](const VideoFramePtr &frame) { postDecodedFrame(frame); });
+    emit logMessage(QStringLiteral("GPU 画面共享不可用，已切换兼容渲染"));
+}
+
+void Session::refreshLicense() {
+    const bool reconnect = !LicenseManager::instance().isPro() &&
+        (m_state == State::Streaming || m_state == State::Connecting) &&
+        (m_streamMaxFps.load() > 60 || m_streamShortEdge == 0 || m_streamShortEdge > 1080);
+    applyProfile(m_profile, false);
+    if (reconnect && !m_serial.isEmpty()) {
+        emit logMessage(QStringLiteral("授权已变更，正在按基础版视频参数重连"));
+        connectDevice(m_serial);
+    }
 }
 
 void Session::attachInputWindow(quintptr hwnd) {
@@ -508,6 +630,7 @@ void Session::setTouchDragActive(bool active) { m_injection.setTouchDragActive(a
 void Session::setLookEnabled(bool enabled) { m_injection.setLookEnabled(enabled); }
 
 void Session::setScreenOff(bool off) {
+    off = off && LicenseManager::instance().isPro();
     m_screenOff = off;
     QSettings().setValue(QStringLiteral("video/screenOff"), off);
     m_profile.screenOff = off;
@@ -526,6 +649,7 @@ void Session::setAudioEnabled(bool enabled) {
 }
 
 void Session::setHumanizerEnabled(bool enabled) {
+    enabled = enabled && LicenseManager::instance().isPro();
     m_humanizerEnabled = enabled;
     QSettings().setValue(QStringLiteral("input/humanizerEnabled"), enabled);
     m_profile.humanizerEnabled = enabled;
@@ -586,6 +710,7 @@ void Session::onVideoSession(int width, int height) {
 }
 
 void Session::onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame, bool configPacket) {
+    if (m_codecFallbackQueued.load()) return;
     m_byteCounter.fetch_add(static_cast<qint64>(payload.size()));
 
     // 配置包（SPS/PPS）作为解码器 extradata，避免部分机型仅在此处携带参数集。
@@ -605,10 +730,15 @@ void Session::onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame
         m_videoDecoder.setExtradata(m_videoExtradata);
         if (!m_videoDecoder.open(m_videoCodecTag, &error)) {
             emit logMessage(QStringLiteral("视频解码初始化失败：%1").arg(error));
+            requestCodecFallback(QStringLiteral("H.265 解码器初始化失败：%1").arg(error));
             return;
         }
         const QString codecName = m_videoDecoder.codecName();
         const bool hardwareDecode = m_videoDecoder.hardwareAccelerated();
+        if (m_streamHevc.load() && !hardwareDecode) {
+            requestCodecFallback(QStringLiteral("H.265 未能启用硬件解码"));
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(m_statsMutex);
             m_stats.videoCodec = codecName;
@@ -638,7 +768,6 @@ void Session::onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame
     const bool ok = m_videoDecoder.decode(
         payload.constData(), payload.size(), pts, keyFrame,
         [this](const VideoFramePtr &frame) {
-            m_frameCounter.fetch_add(1);
             {
                 std::lock_guard<std::mutex> lock(m_statsMutex);
                 m_stats.videoWidth = frame->width;
@@ -652,12 +781,22 @@ void Session::onVideoPacket(const QByteArray &payload, qint64 pts, bool keyFrame
     m_decodeSamples.fetch_add(1);
     if (!ok && !error.isEmpty()) {
         emit logMessage(QStringLiteral("解码错误：%1").arg(error));
+        requestCodecFallback(QStringLiteral("H.265 解码失败：%1").arg(error));
     }
 }
 
 void Session::postDecodedFrame(const VideoFramePtr &frame) {
     if (!frame) {
         return;
+    }
+    if (!m_firstVideoFrame.exchange(true)) {
+        const auto generation = m_streamGeneration.load();
+        QMetaObject::invokeMethod(this, [this, generation] {
+            if (m_stopping || generation != m_streamGeneration.load()) return;
+            m_firstFrameTimer.stop();
+            if (m_streamHevc.load())
+                setVideoNotice(QStringLiteral("H.265 硬解首帧验证通过；持续性能以实际解码 FPS 和处理耗时为准。"));
+        }, Qt::QueuedConnection);
     }
     bool post = false;
     {
@@ -723,7 +862,7 @@ void Session::updateStats() {
     const double elapsedSeconds = std::max(0.001, (now - m_lastStatsTickMs) / 1000.0);
     m_lastStatsTickMs = now;
 
-    const qint64 frames = m_frameCounter.exchange(0);
+    const qint64 frames = m_videoDecoder.takeDecodedFrames();
     const qint64 bytes = m_byteCounter.exchange(0);
     const qint64 decodeSamples = m_decodeSamples.exchange(0);
     const double decodeAccumMs = m_decodeAccumMs.exchange(0.0);

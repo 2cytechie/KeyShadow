@@ -1,4 +1,5 @@
 #include "core/video/VideoDecoder.h"
+#include "core/video/GpuFrameConverter.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -77,6 +78,15 @@ void applyExtradata(AVCodecContext *ctx, const QByteArray &data) {
     }
 }
 
+VideoColorSpace frameColorSpace(const AVFrame *frame) {
+    if (frame->colorspace == AVCOL_SPC_BT2020_NCL || frame->colorspace == AVCOL_SPC_BT2020_CL)
+        return VideoColorSpace::Bt2020;
+    if (frame->colorspace == AVCOL_SPC_BT709 ||
+        (frame->colorspace == AVCOL_SPC_UNSPECIFIED && frame->height > 576))
+        return VideoColorSpace::Bt709;
+    return VideoColorSpace::Bt601;
+}
+
 } // namespace
 
 VideoDecoder::VideoDecoder() = default;
@@ -90,6 +100,7 @@ bool VideoDecoder::open(quint32 codecTag, QString *error) {
     m_deferReadback = !qEnvironmentVariableIsSet("KEYSHADOW_DEFER_READBACK") ||
                       qEnvironmentVariableIntValue("KEYSHADOW_DEFER_READBACK") != 0;
     m_deferFailed = false;
+    m_gpuFailed = false;
 
     const AVCodecID codecId = codecIdFromTag(codecTag);
     m_codecName = codecNameFromTag(codecTag);
@@ -120,7 +131,10 @@ bool VideoDecoder::open(quint32 codecTag, QString *error) {
         if (hwCtx) {
             hwCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;
             hwCtx->flags2 |= AV_CODEC_FLAG2_FAST;
-            hwCtx->thread_count = 0;
+            // Frame threading adds one frame of latency per thread. Hardware
+            // decode does not benefit from queuing an automatic frame pool.
+            hwCtx->thread_count = 1;
+            hwCtx->thread_type = FF_THREAD_SLICE;
             hwCtx->hw_device_ctx = av_buffer_ref(m_hwDeviceCtx);
             hwCtx->get_format = pickHwFormat;
             applyExtradata(hwCtx, m_extradata);
@@ -180,6 +194,7 @@ bool VideoDecoder::openContext(const char *name, QString *error) {
     ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     ctx->flags2 |= AV_CODEC_FLAG2_FAST;
     ctx->thread_count = 0;
+    ctx->thread_type = FF_THREAD_SLICE; // parallel slices without a queue of whole frames
     applyExtradata(ctx, m_extradata);
     if (avcodec_open2(ctx, codec, nullptr) != 0) {
         avcodec_free_context(&ctx);
@@ -205,6 +220,7 @@ void VideoDecoder::close() {
     if (m_swFrame) {
         av_frame_free(&m_swFrame);
     }
+    av_frame_free(&m_lastGpuSource);
     m_swWidth = 0;
     m_swHeight = 0;
     if (m_ctx) {
@@ -212,6 +228,7 @@ void VideoDecoder::close() {
     }
     // 必须在释放硬件设备上下文之前释放 staging 纹理（它们属于那个 D3D11 设备）。
     releaseStaging();
+    m_gpuConverter.reset();
     if (m_hwDeviceCtx) {
         av_buffer_unref(&m_hwDeviceCtx);
     }
@@ -294,6 +311,7 @@ void VideoDecoder::drain(const FrameCallback &callback, bool convertAllowed) {
             return;
         }
 
+        m_decodedFrames.fetch_add(1, std::memory_order_relaxed);
         const bool hardwareFrame = m_frame->format == AV_PIX_FMT_D3D11 ||
                                    m_frame->format == AV_PIX_FMT_D3D11VA_VLD;
 
@@ -305,6 +323,24 @@ void VideoDecoder::drain(const FrameCallback &callback, bool convertAllowed) {
             av_frame_unref(m_frame);
             m_skippedFrames.fetch_add(1);
             continue;
+        }
+
+        if (hardwareFrame && m_gpuFramesEnabled.load() && !m_gpuFailed) {
+            if (!m_gpuConverter) m_gpuConverter = std::make_unique<GpuFrameConverter>();
+            VideoFramePtr output;
+            if (m_gpuConverter->convert(m_frame, m_hwDeviceCtx, output)) {
+                clearPending();
+                if (output) {
+                    av_frame_free(&m_lastGpuSource);
+                    m_lastGpuSource = av_frame_clone(m_frame);
+                    callback(output);
+                }
+                else m_skippedFrames.fetch_add(1);
+                av_frame_unref(m_frame);
+                continue;
+            }
+            m_gpuFailed = true;
+            qWarning() << "GPU color conversion unavailable, using CPU readback";
         }
 
         if (hardwareFrame && deferReadbackEnabled()) {
@@ -324,6 +360,15 @@ void VideoDecoder::drain(const FrameCallback &callback, bool convertAllowed) {
     }
 }
 
+void VideoDecoder::disableGpuFramesAndRecover(const FrameCallback &callback) {
+    m_gpuFramesEnabled.store(false);
+    std::lock_guard<std::mutex> lock(m_decodeMutex);
+    if (m_lastGpuSource) {
+        emitFrameLegacy(m_lastGpuSource, callback);
+        av_frame_free(&m_lastGpuSource);
+    }
+}
+
 void VideoDecoder::emitFrameLegacy(AVFrame *frame, const FrameCallback &callback) {
     AVFrame *source = frame;
     if (frame->format == AV_PIX_FMT_D3D11 || frame->format == AV_PIX_FMT_D3D11VA_VLD) {
@@ -337,6 +382,7 @@ void VideoDecoder::emitFrameLegacy(AVFrame *frame, const FrameCallback &callback
             return;
         }
         source = m_swFrame;
+        av_frame_copy_props(source, frame);
     }
     convertAndEmit(source, callback);
 }
@@ -456,6 +502,8 @@ bool VideoDecoder::stageHwFrame(const AVFrame *frame) {
     m_pendingWidth = width;
     m_pendingHeight = height;
     m_pendingPts = frame->pts;
+    m_pendingColorSpace = frameColorSpace(frame);
+    m_pendingFullRange = frame->color_range == AVCOL_RANGE_JPEG;
     m_pendingStagedAtMs = monotonicNowMs();
     m_pendingAtMs.store(m_pendingStagedAtMs, std::memory_order_relaxed);
     return true;
@@ -501,6 +549,8 @@ bool VideoDecoder::emitPendingFrame(const FrameCallback &callback) {
     }
 
     VideoFramePtr out = makeFrame(width, height, pts, stagedAt);
+    out->colorSpace = m_pendingColorSpace;
+    out->fullRange = m_pendingFullRange;
     uint8_t *dstData[4] = {reinterpret_cast<uint8_t *>(out->y.data()),
                            reinterpret_cast<uint8_t *>(out->u.data()),
                            reinterpret_cast<uint8_t *>(out->v.data()), nullptr};
@@ -578,6 +628,8 @@ void VideoDecoder::convertAndEmit(AVFrame *frame, const FrameCallback &callback)
     }
 
     VideoFramePtr out = makeFrame(width, height, frame->pts, monotonicNowMs());
+    out->colorSpace = frameColorSpace(frame);
+    out->fullRange = frame->color_range == AVCOL_RANGE_JPEG;
     uint8_t *dstData[4] = {reinterpret_cast<uint8_t *>(out->y.data()),
                            reinterpret_cast<uint8_t *>(out->u.data()),
                            reinterpret_cast<uint8_t *>(out->v.data()), nullptr};

@@ -86,7 +86,7 @@ signals:
 
 private:
     void cleanupTunnel();
-    void postFailed(const QString &reason);
+    void postFailed(const QString &reason, quint64 generation);
 
     ScrcpyConfig m_config;
     QString m_deviceName;
@@ -94,6 +94,7 @@ private:
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stopRequested{false};
+    std::atomic<quint64> m_generation{0};
     quintptr m_videoSocket = 0;
     quintptr m_audioSocket = 0;
     quintptr m_controlSocket = 0;

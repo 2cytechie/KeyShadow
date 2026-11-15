@@ -9,6 +9,7 @@
 #include "ui/TabStrip.h"
 #include "ui/Theme.h"
 #include "ui/VideoWidget.h"
+#include "ui/VideoOptionsUi.h"
 
 #include <QApplication>
 #include <QButtonGroup>
@@ -30,6 +31,7 @@
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScreen>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -142,6 +144,7 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
                     }
                 });
         connect(m_session, &Session::statsChanged, this, [this] { updateStatsUi(); });
+        connect(m_session, &Session::videoOptionsChanged, this, [this] { updateStatsUi(); });
         connect(m_session, &Session::stateChanged, this,
                 [this](Session::State state, const QString &message) {
                     const bool streaming = state == Session::State::Streaming;
@@ -189,6 +192,7 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
                         m_summonHoldTimer->stop();
                     }
                     updateStatsOverlay();
+                    updateStatsUi();
                 });
         connect(m_session, &Session::profileChanged, this,
                 [this](const Profile &) { refreshProfileToUi(); });
@@ -236,16 +240,13 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
         return combo;
     };
 
-    m_resolutionCombo = makeCombo({QStringLiteral("原生 · PRO"), QStringLiteral("1080p"),
-                                   QStringLiteral("720p"), QStringLiteral("480p")},
-                                  1);
+    m_resolutionCombo = makeCombo({}, 0);
+    populateResolutions(m_resolutionCombo);
     m_fpsCombo = makeCombo({QStringLiteral("30 fps"), QStringLiteral("60 fps"),
                             QStringLiteral("90 fps · PRO"), QStringLiteral("120 fps · PRO")},
                            1);
-    m_bitrateCombo = makeCombo({QStringLiteral("4 Mbps"), QStringLiteral("8 Mbps"),
-                                QStringLiteral("12 Mbps"), QStringLiteral("16 Mbps"),
-                                QStringLiteral("24 Mbps"), QStringLiteral("32 Mbps")},
-                               1);
+    m_bitrateCombo = makeCombo({}, 0);
+    populateBitrates(m_bitrateCombo);
 
     layout->addWidget(m_resolutionCombo);
     layout->addWidget(m_fpsCombo);
@@ -254,6 +255,7 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
 
     layout->addWidget(new QLabel(QStringLiteral("FPS"), m_toolbar));
     m_fpsLabel = makeMonoLabel(m_toolbar, QStringLiteral("--"), 4);
+    m_fpsLabel->setToolTip(QStringLiteral("解码帧率：每秒成功解码的视频帧数"));
     layout->addWidget(m_fpsLabel);
 
     layout->addSpacing(8);
@@ -327,12 +329,7 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
                 // 原生分辨率为付费功能：未激活时回退到方案当前值（不改动方案）。
                 if (index == 0 && !LicenseManager::instance().isPro()) {
                     showHud(QStringLiteral("原生分辨率为付费功能，激活后解锁"));
-                    const int maxSize = m_session->profile().maxSize;
-                    QSignalBlocker blocker(m_resolutionCombo);
-                    m_resolutionCombo->setCurrentIndex(maxSize >= 1080   ? 1
-                                                       : maxSize >= 720 ? 2
-                                                       : maxSize >= 480 ? 3
-                                                                        : 1);
+                    syncResolution(m_resolutionCombo, m_session->profile());
                     return;
                 }
                 applyVideoOptions();
@@ -358,6 +355,7 @@ void ConsolePage::buildToolbar(QVBoxLayout *rootLayout) {
 // ---------------------------------------------------------------------------
 void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
     m_video = new VideoWidget(this);
+    connect(m_video, &VideoWidget::gpuFramesUnavailable, m_session, &Session::disableGpuFrames);
     centerLayout->addWidget(m_video, 1);
     m_video->installEventFilter(this);
 
@@ -545,7 +543,7 @@ QWidget *ConsolePage::buildQualityTab() {
          static_cast<int>(profile.saturation), QString()},
         {QStringLiteral("shadow"), QStringLiteral("阴影"), 0, 100,
          static_cast<int>(profile.shadow), QStringLiteral("%")},
-        {QStringLiteral("sharpness"), QStringLiteral("锐化"), 0, 100,
+        {QStringLiteral("sharpness"), QStringLiteral("CAS 锐化"), 0, 100,
          static_cast<int>(profile.sharpness), QStringLiteral("%")},
     };
 
@@ -609,6 +607,7 @@ QWidget *ConsolePage::buildQualityTab() {
 
     m_qualityInfo = new QLabel(QStringLiteral("--"), panel);
     m_qualityInfo->setProperty("variant", "micro");
+    m_qualityInfo->setToolTip(QStringLiteral("GPU 耗时统计缩放和增强绘制的总耗时，不含解码、垂直同步与屏幕扫描，也不是与关闭增强相比的额外开销。"));
     layout->addWidget(m_qualityInfo);
 
     layout->addStretch(1);
@@ -886,24 +885,14 @@ void ConsolePage::refreshProfileToUi() {
     QSignalBlocker blockFps(m_fpsCombo);
     QSignalBlocker blockBitrate(m_bitrateCombo);
 
-    int resolutionIndex = profile.maxSize >= 1080 ? 1
-                        : profile.maxSize >= 720 ? 2
-                        : profile.maxSize >= 480 ? 3
-                                                 : 0;
-    if (resolutionIndex == 0 && !LicenseManager::instance().isPro()) {
-        resolutionIndex = 1; // 原生分辨率为付费功能
-    }
-    m_resolutionCombo->setCurrentIndex(resolutionIndex);
+    syncResolution(m_resolutionCombo, profile);
     m_fpsCombo->setCurrentIndex(profile.maxFps >= 120 ? 3
                               : profile.maxFps >= 90 ? 2
                               : profile.maxFps >= 60 ? 1
                                                      : 0);
-    const int mbps = std::max(1, profile.videoBitRate / 1'000'000);
-    const int bitrateIndex = mbps <= 4 ? 0 : mbps <= 8 ? 1 : mbps <= 12 ? 2
-                                                              : mbps <= 16 ? 3
-                                                              : mbps <= 24 ? 4
-                                                                           : 5;
-    m_bitrateCombo->setCurrentIndex(bitrateIndex);
+    syncBitrate(m_bitrateCombo, profile.videoBitRate);
+    m_video->setQualityPriority(m_session->qualityPriority());
+    m_video->setTargetFps(profile.maxFps);
 
     VideoWidget::EnhanceParams params;
     params.brightness = static_cast<float>(profile.brightness);
@@ -1005,14 +994,12 @@ void ConsolePage::applyVideoOptions() {
     }
     Profile profile = m_session->profile();
 
-    static const int resolutions[] = {0, 1080, 720, 480};
-    profile.maxSize = resolutions[std::clamp(m_resolutionCombo->currentIndex(), 0, 3)];
+    readResolution(m_resolutionCombo, profile);
 
     static const int fpsValues[] = {30, 60, 90, 120};
     profile.maxFps = fpsValues[std::clamp(m_fpsCombo->currentIndex(), 0, 3)];
 
-    static const int bitrates[] = {4, 8, 12, 16, 24, 32};
-    profile.videoBitRate = bitrates[std::clamp(m_bitrateCombo->currentIndex(), 0, 5)] * 1'000'000;
+    profile.videoBitRate = m_bitrateCombo->currentData().toInt();
 
     m_session->applyProfile(profile, true);
 
@@ -1025,9 +1012,18 @@ void ConsolePage::applyVideoOptions() {
 void ConsolePage::updateStatsUi() {
     const Session::Stats stats = m_session->stats();
     const double presentMs = m_video ? m_video->presentLatencyMs() : -1.0;
+    const auto render = m_video->renderStats();
+    const QString gpuMs = render.gpuMs >= 0 ? QString::number(render.gpuMs, 'f', 2)
+                                          : QStringLiteral("--");
+    const QString submitMs = render.submitMs >= 0 ? QString::number(render.submitMs, 'f', 2)
+                                                : QStringLiteral("--");
 
     m_fpsLabel->setText(stats.fps > 0.5 ? QString::number(std::lround(stats.fps))
                                         : QStringLiteral("--"));
+    if (m_video && m_video->screen()) {
+        m_fpsLabel->setToolTip(QStringLiteral("每秒成功解码的视频帧数。当前投屏显示器：%1 Hz")
+                                  .arg(m_video->screen()->refreshRate(), 0, 'f', 0));
+    }
     if (m_statsOverlay) {
         const QString fps = stats.fps > 0.5 ? QString::number(std::lround(stats.fps))
                                             : QStringLiteral("--");
@@ -1037,8 +1033,10 @@ void ConsolePage::updateStatsUi() {
                                     : QStringLiteral("--");
         const QString present = presentMs >= 0 ? QString::number(presentMs, 'f', 0)
                                                : QStringLiteral("--");
-        m_statsOverlay->setText(QStringLiteral("%1 FPS · %2 Mbps · 输入 %3 ms · 显示 %4 ms")
-                                    .arg(fps, mbps, latency, present));
+        m_statsOverlay->setText(QStringLiteral("解码 %1 FPS · %2 Mbps · 输入 %3 ms · 提交延迟 %4 ms · 缩放/增强 GPU %5 ms%6")
+                                    .arg(fps, mbps, latency, present, gpuMs,
+                                         render.degradation > 0 ? QStringLiteral(" · 性能保护") : QString()));
+        m_statsOverlay->setToolTip(render.status + QLatin1Char('\n') + m_session->videoNotice());
         m_statsOverlay->adjustSize();
         layoutVideoOverlays();
     }
@@ -1071,6 +1069,8 @@ void ConsolePage::updateStatsUi() {
                                  .arg(stats.backlogKb >= 0
                                           ? QString::number(std::lround(stats.backlogKb))
                                           : QStringLiteral("--")));
+    m_statusLatency->setToolTip(QStringLiteral("缩放/增强 GPU %1 ms · CPU 提交 %2 ms\nGPU 统计是缩放与增强绘制的总耗时，不含显示器扫描，也不是相对关闭增强的额外耗时。\n%3\n%4")
+                                   .arg(gpuMs, submitMs, render.status, m_session->videoNotice()));
     m_statusCodec->setText(
         QStringLiteral("%1 · %2×%3 · %4")
             .arg(stats.videoCodec.isEmpty() ? QStringLiteral("--") : stats.videoCodec.toUpper())
@@ -1089,22 +1089,25 @@ void ConsolePage::updateStatsUi() {
                           << " decode=" << QString::number(stats.decodeMs, 'f', 1)
                           << "ms input=" << QString::number(stats.inputLatencyMs, 'f', 1)
                           << "ms present=" << QString::number(presentMs, 'f', 1)
-                          << "ms pending=" << stats.pendingFrame
+                          << "ms renderGpu=" << gpuMs << "ms submitCpu=" << submitMs
+                          << "ms protection=" << render.degradation
+                          << " pending=" << stats.pendingFrame
                           << " backlog=" << QString::number(stats.backlogKb, 'f', 0) << "KB"
                           << " target=" << m_session->profile().maxFps;
     }
 
     if (m_qualityInfo) {
         if (stats.videoWidth > 0) {
-            const int fps = stats.fps > 0.5 ? static_cast<int>(std::lround(stats.fps))
-                                            : m_session->profile().maxFps;
-            m_qualityInfo->setText(QStringLiteral("%1×%2 · %3fps · %4")
+            const int fps = static_cast<int>(std::lround(stats.fps));
+            m_qualityInfo->setWordWrap(true);
+            m_qualityInfo->setText(QStringLiteral("%1×%2 · 解码 %3 FPS · %4\n缩放/增强 GPU %5 ms · CPU 提交 %6 ms\n%7\n%8")
                                        .arg(stats.videoWidth)
                                        .arg(stats.videoHeight)
                                        .arg(fps)
                                        .arg(stats.videoCodec.isEmpty()
                                                 ? QStringLiteral("--")
-                                                : stats.videoCodec.toUpper()));
+                                                : stats.videoCodec.toUpper())
+                                       .arg(gpuMs, submitMs, render.status, m_session->videoNotice()));
         } else {
             m_qualityInfo->setText(QStringLiteral("--"));
         }

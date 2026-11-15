@@ -10,7 +10,7 @@ namespace ks {
 /// 键位方案持久化（JSON）。存放于 %APPDATA%/KeyShadow/profiles。
 class ProfileStore {
 public:
-    ProfileStore();
+    explicit ProfileStore(const QString &directory = {});
 
     QString directory() const { return m_directory; }
 

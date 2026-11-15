@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 
 #include "core/adb/AdbProcess.h"
 #include "core/audio/AudioDecoder.h"
@@ -85,12 +86,9 @@ int main(int argc, char *argv[]) {
     auto videoReader = std::make_unique<ks::ScrcpyStreamReader>();
     auto audioReader = std::make_unique<ks::ScrcpyStreamReader>();
 
-    int frames = 0;
-    int audioPackets = 0;
-    qint64 decodeAccumNs = 0;
-    int decodeSamples = 0;
-    int width = 0;
-    int height = 0;
+    std::atomic<int> frames{0}, audioPackets{0}, decodeSamples{0};
+    std::atomic<qint64> decodeAccumNs{0};
+    std::atomic<int> width{0}, height{0};
     quint32 codecTag = 0;
 
     QObject::connect(&client, &ks::ScrcpyClient::connecting,
@@ -241,22 +239,29 @@ int main(int argc, char *argv[]) {
     const int probeFps = qEnvironmentVariableIntValue("KEYSHADOW_PROBE_MAX_FPS");
     config.maxFps = probeFps > 0 ? probeFps : 60;
     config.maxSize = qEnvironmentVariableIntValue("KEYSHADOW_PROBE_MAX_SIZE");
+    config.videoCodec = qEnvironmentVariable("KEYSHADOW_PROBE_CODEC") == QStringLiteral("h265")
+                            ? QStringLiteral("h265") : QStringLiteral("h264");
+    config.audio = qEnvironmentVariableIntValue("KEYSHADOW_PROBE_NO_AUDIO") != 1;
 
     logLine("adb=%s jar=%s serial=%s", qPrintable(config.adbPath),
             qPrintable(config.serverJarPath), qPrintable(serial));
     client.start(config);
 
     QTimer stats;
+    QElapsedTimer statsClock;
+    statsClock.start();
     QObject::connect(&stats, &QTimer::timeout, [&] {
-        const double decodeMs =
-            decodeSamples > 0 ? decodeAccumNs / 1e6 / decodeSamples : 0.0;
-        logLine("[stat] frames=%d audio=%d session=%dx%d decode=%.2fms", frames, audioPackets,
-                width, height, decodeMs);
+        const int samples = decodeSamples.load();
+        const double decodeMs = samples > 0 ? decodeAccumNs.load() / 1e6 / samples : 0.0;
+        const double elapsed = std::max(0.001, statsClock.restart()/1000.0);
+        const double fps = decoder.takeDecodedFrames()/elapsed;
+        logLine("[stat] frames=%d decoded=%.1ffps audio=%d session=%dx%d decode=%.2fms",
+                frames.load(), fps, audioPackets.load(), width.load(), height.load(), decodeMs);
     });
     stats.start(1000);
 
     QTimer::singleShot(15000, &app, [&] {
-        logLine("[done] frames=%d audioPackets=%d", frames, audioPackets);
+        logLine("[done] frames=%d audioPackets=%d", frames.load(), audioPackets.load());
         const bool ok = frames >= 10;
         videoReader->stop();
         audioReader->stop();

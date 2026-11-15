@@ -196,6 +196,7 @@ ScrcpyClient::ScrcpyClient(QObject *parent) : QObject(parent) { ensureWinsock();
 ScrcpyClient::~ScrcpyClient() { stop(); }
 
 void ScrcpyClient::start(const ScrcpyConfig &config) {
+    const quint64 generation = m_generation.fetch_add(1) + 1;
     // 防御：上一次连接失败时 postFailed() 只置位 m_running，线程对象可能仍 joinable。
     // 这里先回收，避免给 joinable std::thread 赋值导致进程终止。
     if (m_thread.joinable()) {
@@ -215,16 +216,17 @@ void ScrcpyClient::start(const ScrcpyConfig &config) {
     m_stopRequested.store(false);
     m_config = config;
     m_deviceName.clear();
-    m_thread = std::thread([this] {
+    m_thread = std::thread([this, generation] {
         AdbProcess adb;
         adb.setAdbPath(m_config.adbPath.isEmpty() ? AdbProcess::resolveAdbPath() : m_config.adbPath);
         const QString serial = m_config.serial;
 
-        auto fail = [this](const QString &reason) { postFailed(reason); };
+        auto fail = [this, generation](const QString &reason) { postFailed(reason, generation); };
 
         // 1) 推送 scrcpy-server
-        QMetaObject::invokeMethod(this, [this] { emit connecting(QStringLiteral("推送 scrcpy-server")); },
-                                  Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this, generation] {
+            if (generation == m_generation.load()) emit connecting(QStringLiteral("推送 scrcpy-server"));
+        }, Qt::QueuedConnection);
         if (!QFileInfo::exists(m_config.serverJarPath)) {
             fail(QStringLiteral("缺少 scrcpy-server.jar：%1").arg(m_config.serverJarPath));
             return;
@@ -270,8 +272,9 @@ void ScrcpyClient::start(const ScrcpyConfig &config) {
         qInfo() << "adb reverse ok, port" << m_localPort << "socket" << m_socketName;
 
         // 3) 启动 scrcpy-server
-        QMetaObject::invokeMethod(this, [this] { emit connecting(QStringLiteral("启动 scrcpy-server")); },
-                                  Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this, generation] {
+            if (generation == m_generation.load()) emit connecting(QStringLiteral("启动 scrcpy-server"));
+        }, Qt::QueuedConnection);
         QString command = QStringLiteral("CLASSPATH=%1 app_process / com.genymobile.scrcpy.Server %2")
                               .arg(QString::fromLatin1(kRemoteServerPath), m_config.serverVersion);
         command += QStringLiteral(" scid=%1").arg(scid, 8, 16, QLatin1Char('0'));
@@ -287,6 +290,7 @@ void ScrcpyClient::start(const ScrcpyConfig &config) {
             command += QStringLiteral(" max_size=%1").arg(m_config.maxSize);
         }
         command += QStringLiteral(" clipboard_autosync=false");
+        command += QStringLiteral(" downsize_on_error=false");
 
         if (!adb.startServerDetached(serial, command, &m_serverPid, &error)) {
             fail(QStringLiteral("启动 scrcpy-server 失败：%1").arg(error));
@@ -296,8 +300,9 @@ void ScrcpyClient::start(const ScrcpyConfig &config) {
         qInfo() << "scrcpy-server started, pid" << m_serverPid << "cmd" << command;
 
         // 4) 依次接受 video / audio / control 三路连接
-        QMetaObject::invokeMethod(this, [this] { emit connecting(QStringLiteral("等待设备回连")); },
-                                  Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this, generation] {
+            if (generation == m_generation.load()) emit connecting(QStringLiteral("等待设备回连"));
+        }, Qt::QueuedConnection);
 
         const int expected = m_config.audio ? 3 : 2;
         QList<SOCKET> accepted;
@@ -337,7 +342,9 @@ void ScrcpyClient::start(const ScrcpyConfig &config) {
             if (m_stopRequested.load()) {
                 cleanupTunnel();
                 m_running.store(false);
-                QMetaObject::invokeMethod(this, [this] { emit stopped(); }, Qt::QueuedConnection);
+                QMetaObject::invokeMethod(this, [this, generation] {
+                    if (generation == m_generation.load()) emit stopped();
+                }, Qt::QueuedConnection);
             } else {
                 fail(QStringLiteral("等待设备回连超时，请确认手机已授权 USB 调试"));
                 cleanupTunnel();
@@ -372,8 +379,10 @@ void ScrcpyClient::start(const ScrcpyConfig &config) {
 
         QMetaObject::invokeMethod(
             this,
-            [this, deviceName, videoSocket, audioSocket, controlSocket] {
+            [this, deviceName, videoSocket, audioSocket, controlSocket, generation] {
+                if (generation != m_generation.load()) return;
                 emit connected(deviceName);
+                if (generation != m_generation.load()) return;
                 emit channelsReady(videoSocket, audioSocket, controlSocket, m_localPort);
             },
             Qt::QueuedConnection);
@@ -386,11 +395,13 @@ void ScrcpyClient::detachSockets() {
     m_controlSocket = 0;
 }
 
-void ScrcpyClient::postFailed(const QString &reason) {
+void ScrcpyClient::postFailed(const QString &reason, quint64 generation) {
     qWarning() << "scrcpy connection failed:" << reason;
     m_running.store(false);
     QMetaObject::invokeMethod(
-        this, [this, reason] { emit failed(reason); }, Qt::QueuedConnection);
+        this, [this, reason, generation] {
+            if (generation == m_generation.load()) emit failed(reason);
+        }, Qt::QueuedConnection);
 }
 
 void ScrcpyClient::cleanupTunnel() {
@@ -410,6 +421,7 @@ void ScrcpyClient::cleanupTunnel() {
 }
 
 void ScrcpyClient::stop() {
+    m_generation.fetch_add(1); // Invalidate queued callbacks before another connection starts.
     if (!m_running.exchange(false)) {
         if (m_thread.joinable()) {
             m_thread.join();

@@ -54,7 +54,7 @@ QJsonObject profileToJson(const Profile &profile) {
     QJsonObject video;
     video.insert(QStringLiteral("bitRate"), profile.videoBitRate);
     video.insert(QStringLiteral("maxFps"), profile.maxFps);
-    video.insert(QStringLiteral("maxSize"), profile.maxSize);
+    video.insert(QStringLiteral("shortEdge"), profile.videoShortEdge);
     video.insert(QStringLiteral("audio"), profile.audioEnabled);
     video.insert(QStringLiteral("screenOff"), profile.screenOff);
     obj.insert(QStringLiteral("video"), video);
@@ -104,7 +104,7 @@ Profile profileFromJson(const QJsonObject &obj) {
     const QJsonObject video = obj.value(QStringLiteral("video")).toObject();
     profile.videoBitRate = video.value(QStringLiteral("bitRate")).toInt(8000000);
     profile.maxFps = video.value(QStringLiteral("maxFps")).toInt(60);
-    profile.maxSize = video.value(QStringLiteral("maxSize")).toInt(0);
+    profile.videoShortEdge = video.value(QStringLiteral("shortEdge")).toInt(0);
     profile.audioEnabled = video.value(QStringLiteral("audio")).toBool(true);
     profile.screenOff = video.value(QStringLiteral("screenOff")).toBool(false);
 
@@ -124,9 +124,9 @@ Profile profileFromJson(const QJsonObject &obj) {
 
 } // namespace
 
-ProfileStore::ProfileStore() {
+ProfileStore::ProfileStore(const QString &directory) {
     const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    m_directory = base + QStringLiteral("/profiles");
+    m_directory = directory.isEmpty() ? base + QStringLiteral("/profiles") : directory;
     QDir().mkpath(m_directory);
 }
 

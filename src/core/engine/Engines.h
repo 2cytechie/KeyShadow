@@ -83,7 +83,7 @@ struct Profile {
     // 视频参数
     int videoBitRate = 8000000;
     int maxFps = 60;
-    int maxSize = 0;
+    int videoShortEdge = 0; ///< 0 = 原生分辨率；正数 = 短边像素数
     bool audioEnabled = true;
     bool screenOff = false;
 };

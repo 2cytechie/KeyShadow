@@ -54,6 +54,9 @@ set(KEYSHADOW_CORE_SOURCES
     src/core/scrcpy/ScrcpyClient.cpp
     src/core/video/VideoFrame.cpp
     src/core/video/VideoDecoder.cpp
+    src/core/video/VideoOptions.cpp
+    src/core/video/RenderPolicy.cpp
+    src/core/video/GpuFrameConverter.cpp
     src/core/audio/AudioDecoder.cpp
     src/core/audio/AudioPlayer.cpp
     src/core/input/RawInput.cpp
@@ -69,6 +72,9 @@ set(KEYSHADOW_CORE_HEADERS
     src/core/scrcpy/ScrcpyClient.h
     src/core/video/VideoFrame.h
     src/core/video/VideoDecoder.h
+    src/core/video/VideoOptions.h
+    src/core/video/RenderPolicy.h
+    src/core/video/GpuFrameConverter.h
     src/core/audio/AudioDecoder.h
     src/core/audio/AudioPlayer.h
     src/core/input/RawInput.h
@@ -115,6 +121,7 @@ set(KEYSHADOW_UI_SOURCES
     src/ui/pages/ConsolePage.cpp
     src/ui/pages/SettingsPage.cpp
     src/ui/VideoWidget.cpp
+    src/ui/GpuTextureInterop.cpp
     src/app/Session.cpp
     src/license/LicenseManager.cpp
 )
@@ -131,6 +138,7 @@ set(KEYSHADOW_UI_HEADERS
     src/ui/pages/ConsolePage.h
     src/ui/pages/SettingsPage.h
     src/ui/VideoWidget.h
+    src/ui/VideoPresentationSettings.h
     src/app/Session.h
     src/license/LicenseManager.h
 )
@@ -161,6 +169,7 @@ endif()
 # 将 FFmpeg 运行库复制到输出目录（与 exe 同级）
 add_custom_command(TARGET KeyShadow POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FFMPEG_DLLS} "$<TARGET_FILE_DIR:KeyShadow>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md" "$<TARGET_FILE_DIR:KeyShadow>"
     COMMENT "Copy FFmpeg runtime DLLs"
 )
 
@@ -174,6 +183,13 @@ target_link_libraries(keyshadow_tests PRIVATE keyshadow_core)
 if(MSVC)
     target_compile_options(keyshadow_tests PRIVATE /utf-8)
 endif()
+
+add_executable(keyshadow_video_tests tests/test_video.cpp src/ui/VideoWidget.cpp
+    src/ui/VideoWidget.h src/ui/GpuTextureInterop.cpp src/app/Session.cpp src/app/Session.h
+    src/license/LicenseManager.cpp)
+target_link_libraries(keyshadow_video_tests PRIVATE keyshadow_core)
+qt_add_resources(keyshadow_video_tests "video_test_server"
+    PREFIX "/" BASE "resources" FILES resources/scrcpy-server.jar)
 
 # 无界面联调探针（连接真机验证协议/解码链路）
 add_executable(keyshadow_probe tools/probe.cpp)
