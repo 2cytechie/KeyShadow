@@ -154,6 +154,8 @@ qt_add_resources(KeyShadow "keyshadow_resources"
         resources/theme.qss
         resources/icons/check.svg
         resources/icons/check-disabled.svg
+        resources/icons/spin-up.svg
+        resources/icons/spin-down.svg
         resources/icons/app-icon.svg
         resources/icons/app-icon.ico
         resources/scrcpy-server.jar

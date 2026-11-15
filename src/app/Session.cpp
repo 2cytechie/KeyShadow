@@ -664,6 +664,10 @@ qint64 Session::pollCalibratedCounts() { return m_injection.takeCalibratedCounts
 
 void Session::sendControlMessage(const QByteArray &message) { m_injection.sendMessage(message); }
 
+void Session::sendInputMessage(const QByteArray &message, qint64 qpcTimestamp) {
+    m_injection.sendInputMessage(message, qpcTimestamp);
+}
+
 void Session::releaseAllTouches() { m_injection.releaseAll(); }
 
 void Session::startAudio() {
@@ -876,7 +880,16 @@ void Session::updateStats() {
         m_stats.pendingFrame = m_framePostPending.load(std::memory_order_relaxed) ? 1 : 0;
         m_stats.backlogKb = m_videoReader ? m_videoReader->backlogBytes() / 1024.0 : -1.0;
         m_stats.bitrateMbps = (bytes * 8.0) / elapsedSeconds / 1'000'000.0;
-        m_stats.inputLatencyMs = m_injection.takeLatencyMs();
+        const double latencySample = m_injection.takeLatencyMs();
+        if (latencySample >= 0.0) {
+            m_stats.inputLatencyMs = latencySample;
+            m_latencyHoldSeconds = 0.0;
+        } else if (m_stats.inputLatencyMs >= 0.0) {
+            m_latencyHoldSeconds += elapsedSeconds;
+            if (m_latencyHoldSeconds > 5.0) {
+                m_stats.inputLatencyMs = -1.0;
+            }
+        }
         m_stats.decodeMs = decodeSamples > 0 ? decodeAccumMs / decodeSamples : 0.0;
         snapshot = m_stats;
     }

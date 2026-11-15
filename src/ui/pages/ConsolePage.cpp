@@ -85,11 +85,10 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
 
     QSettings settings;
     m_summonKey = settings.value(QStringLiteral("input/summonKey"), 0x12).toInt();
-    m_summonHoldMs = settings.value(QStringLiteral("input/summonHoldMs"), 300).toInt();
-    m_summonMode = settings.value(QStringLiteral("input/summonMode"), QStringLiteral("longPress"))
+    m_summonMode = settings.value(QStringLiteral("input/summonMode"), QStringLiteral("toggle"))
                            .toString() == QStringLiteral("hold")
                        ? SummonMode::Hold
-                       : SummonMode::LongPress;
+                       : SummonMode::Toggle;
     m_statsOverlayEnabled = settings.value(QStringLiteral("display/statsOverlay"), true).toBool();
 
     auto *root = new QVBoxLayout(this);
@@ -115,15 +114,6 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
     m_summonHintTimer = new QTimer(this);
     m_summonHintTimer->setSingleShot(true);
     connect(m_summonHintTimer, &QTimer::timeout, this, [this] { m_summonHint->hide(); });
-
-    m_summonHoldTimer = new QTimer(this);
-    m_summonHoldTimer->setSingleShot(true);
-    m_summonHoldTimer->setInterval(m_summonHoldMs);
-    connect(m_summonHoldTimer, &QTimer::timeout, this, [this] {
-        if (m_summonHeld) {
-            enterPointerMode();
-        }
-    });
 
     m_keyCaptureTimer = new QTimer(this);
     m_keyCaptureTimer->setSingleShot(true);
@@ -188,8 +178,6 @@ ConsolePage::ConsolePage(Session *session, QWidget *parent) : QWidget(parent), m
                             showHud(QStringLiteral("设备已断开，键位修改已保留，重新连接后可继续保存"));
                         }
                         setInputMode(InputMode::Idle);
-                        m_summonHeld = false;
-                        m_summonHoldTimer->stop();
                     }
                     updateStatsOverlay();
                     updateStatsUi();
@@ -495,7 +483,7 @@ QWidget *ConsolePage::buildQualityTab() {
     auto *panel = new QWidget();
     auto *layout = new QVBoxLayout(panel);
     layout->setContentsMargins(16, 16, 16, 16);
-    layout->setSpacing(10);
+    layout->setSpacing(6);
 
     auto *titleRow = new QHBoxLayout();
     auto *title = new QLabel(QStringLiteral("画面增强"), panel);
@@ -543,7 +531,7 @@ QWidget *ConsolePage::buildQualityTab() {
          static_cast<int>(profile.saturation), QString()},
         {QStringLiteral("shadow"), QStringLiteral("阴影"), 0, 100,
          static_cast<int>(profile.shadow), QStringLiteral("%")},
-        {QStringLiteral("sharpness"), QStringLiteral("CAS 锐化"), 0, 100,
+        {QStringLiteral("sharpness"), QStringLiteral("锐化"), 0, 100,
          static_cast<int>(profile.sharpness), QStringLiteral("%")},
     };
 
@@ -551,10 +539,11 @@ QWidget *ConsolePage::buildQualityTab() {
         auto *row = new QWidget(panel);
         auto *rowLayout = new QHBoxLayout(row);
         rowLayout->setContentsMargins(0, 0, 0, 0);
-        rowLayout->setSpacing(8);
+        rowLayout->setSpacing(6);
 
+        // 宽度取最长标题“对比度/饱和度”的实际文字宽度，避免标签内留白挤占滑杆长度。
         auto *label = new QLabel(spec.title, row);
-        label->setMinimumWidth(64);
+        label->setMinimumWidth(40);
         label->setProperty("variant", "caption");
 
         auto *slider = new QSlider(Qt::Horizontal, row);
@@ -565,7 +554,7 @@ QWidget *ConsolePage::buildQualityTab() {
         auto *value = new QLabel(formatQualityValue(spec.key, spec.initial, spec.suffix), row);
         value->setProperty("variant", "mono");
         value->setFont(Theme::monoFont(12));
-        value->setMinimumWidth(48);
+        value->setMinimumWidth(36);
         value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
         rowLayout->addWidget(label);
@@ -697,7 +686,8 @@ QWidget *ConsolePage::buildKeymapTab() {
     m_sensitivitySpin->setSingleStep(0.05);
     m_sensitivitySpin->setDecimals(2);
     m_sensitivitySpin->setSuffix(QStringLiteral(" ×"));
-    m_sensitivitySpin->setFixedWidth(84);
+    m_sensitivitySpin->setProperty("variant", "compact");
+    m_sensitivitySpin->setFixedSize(68, 26);
     sensitivityRow->addWidget(m_sensitivitySpin);
     edit->addLayout(sensitivityRow);
 
@@ -718,10 +708,14 @@ QWidget *ConsolePage::buildKeymapTab() {
     positionRow->addWidget(new QLabel(QStringLiteral("X"), m_editBox));
     m_xSpin = new QSpinBox(m_editBox);
     m_xSpin->setRange(0, 1000);
+    m_xSpin->setProperty("variant", "compact");
+    m_xSpin->setFixedSize(58, 26);
     positionRow->addWidget(m_xSpin);
     positionRow->addWidget(new QLabel(QStringLiteral("Y"), m_editBox));
     m_ySpin = new QSpinBox(m_editBox);
     m_ySpin->setRange(0, 1000);
+    m_ySpin->setProperty("variant", "compact");
+    m_ySpin->setFixedSize(58, 26);
     positionRow->addWidget(m_ySpin);
     edit->addLayout(positionRow);
 
@@ -1144,8 +1138,6 @@ bool ConsolePage::requestDeactivate() {
         exitKeymapEdit(false);
     }
     m_active = false;
-    m_summonHeld = false;
-    m_summonHoldTimer->stop();
     setInputMode(InputMode::Idle);
     m_hud->hide();
     m_summonHint->hide();
@@ -1319,13 +1311,11 @@ void ConsolePage::setSummonKey(int vk) {
 
 void ConsolePage::setSummonMode(const QString &mode) {
     const SummonMode next = mode == QStringLiteral("hold") ? SummonMode::Hold
-                                                           : SummonMode::LongPress;
+                                                           : SummonMode::Toggle;
     if (m_summonMode == next) {
         return;
     }
     m_summonMode = next;
-    m_summonHeld = false;
-    m_summonHoldTimer->stop();
     updateSummonText();
     if (m_mode == InputMode::Pointer) {
         showHud(pointerHudText(), true);
@@ -1347,16 +1337,13 @@ void ConsolePage::onSummonKeyPressed(bool down) {
         return;
     }
 
+    // 切换：按一次呼出鼠标，再按一次返回游戏操作。
     if (down) {
         if (m_mode == InputMode::Pointer) {
             setInputMode(InputMode::Mapping);
-            return;
+        } else {
+            enterPointerMode();
         }
-        m_summonHeld = true;
-        m_summonHoldTimer->start(m_summonHoldMs);
-    } else {
-        m_summonHeld = false;
-        m_summonHoldTimer->stop();
     }
 }
 
@@ -1402,9 +1389,10 @@ void ConsolePage::sendPointerTouch(int action, const QPoint &widgetPos, bool cla
     const qint32 actionButton = up ? proto::ButtonNone : proto::ButtonPrimary;
     const qint32 buttons = up ? proto::ButtonNone : proto::ButtonPrimary;
     // pointer 10 专用直操触点：键位引擎分配范围为 2..9，互不重叠。
-    m_session->sendControlMessage(proto::touch(touchAction, 10, device.x(), device.y(),
-                                               size.width(), size.height(), 1.0f, actionButton,
-                                               buttons));
+    m_session->sendInputMessage(proto::touch(touchAction, 10, device.x(), device.y(),
+                                             size.width(), size.height(), 1.0f, actionButton,
+                                             buttons),
+                                qpcNowTicks());
 }
 
 // ---------------------------------------------------------------------------
@@ -1951,9 +1939,10 @@ void ConsolePage::updateSummonText() {
     if (!m_summonHint) {
         return;
     }
-    const QString action =
-        m_summonMode == SummonMode::Hold ? QStringLiteral("按住") : QStringLiteral("长按");
-    m_summonHint->setText(QStringLiteral("%1 %2 呼出鼠标").arg(action, vkName(m_summonKey)));
+    m_summonHint->setText(
+        m_summonMode == SummonMode::Hold
+            ? QStringLiteral("按住 %1 呼出鼠标").arg(vkName(m_summonKey))
+            : QStringLiteral("按 %1 切换鼠标模式").arg(vkName(m_summonKey)));
     m_summonHint->adjustSize();
 }
 
@@ -2028,25 +2017,6 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
     if (watched == m_video) {
         if (event->type() == QEvent::Resize) {
             layoutVideoOverlays();
-        } else if (event->type() == QEvent::KeyPress && m_mode == InputMode::Pointer) {
-            auto *keyEvent = static_cast<QKeyEvent *>(event);
-            // Esc 不再退出指针模式：留给屏幕操控（可绑定键位）；退出鼠标模式用呼出键/工具栏按钮
-            const int vk = vkFromKeyEvent(*keyEvent);
-            if (vk && vkMatchesSummon(vk, m_summonKey) && !keyEvent->isAutoRepeat()) {
-                if (m_summonMode == SummonMode::LongPress) {
-                    setInputMode(InputMode::Mapping);
-                }
-                return true;
-            }
-        } else if (event->type() == QEvent::KeyRelease && m_mode == InputMode::Pointer) {
-            auto *keyEvent = static_cast<QKeyEvent *>(event);
-            const int vk = vkFromKeyEvent(*keyEvent);
-            if (vk && vkMatchesSummon(vk, m_summonKey) && !keyEvent->isAutoRepeat()) {
-                if (m_summonMode == SummonMode::Hold) {
-                    setInputMode(InputMode::Mapping);
-                }
-                return true;
-            }
         } else if (event->type() == QEvent::Wheel) {
             auto *wheelEvent = static_cast<QWheelEvent *>(event);
             const QPoint pos = wheelEvent->position().toPoint();
@@ -2074,9 +2044,11 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
                 QPoint device;
                 if (!rect.isEmpty() && rect.contains(pos) && mapToDevice(pos, &device)) {
                     const QSize size = deviceSize();
-                    m_session->sendControlMessage(proto::scroll(
-                        device.x(), device.y(), size.width(), size.height(), 0.0f,
-                        static_cast<float>(delta)));
+                    m_session->sendInputMessage(proto::scroll(
+                                                    device.x(), device.y(), size.width(),
+                                                    size.height(), 0.0f,
+                                                    static_cast<float>(delta)),
+                                                qpcNowTicks());
                 }
                 return true;
             }
@@ -2100,15 +2072,6 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
                 }
                 return true;
             }
-            if (mouseEvent->button() == Qt::MiddleButton ||
-                mouseEvent->button() == Qt::RightButton) {
-                const int vk = mouseEvent->button() == Qt::MiddleButton ? 0x04 : 0x02;
-                if (m_mode == InputMode::Pointer && m_summonMode == SummonMode::LongPress &&
-                    vkMatchesSummon(vk, m_summonKey)) {
-                    setInputMode(InputMode::Mapping);
-                }
-                return true;
-            }
         } else if (m_draggingTouch && event->type() == QEvent::MouseMove) {
             auto *mouseEvent = static_cast<QMouseEvent *>(event);
             sendPointerTouch(static_cast<int>(proto::TouchAction::Move), mouseEvent->pos(), true);
@@ -2119,15 +2082,6 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
                 sendPointerTouch(static_cast<int>(proto::TouchAction::Up), mouseEvent->pos(), true);
                 m_draggingTouch = false;
                 m_session->setTouchDragActive(false);
-                return true;
-            }
-            if (m_mode == InputMode::Pointer && m_summonMode == SummonMode::Hold &&
-                (mouseEvent->button() == Qt::MiddleButton ||
-                 mouseEvent->button() == Qt::RightButton)) {
-                const int vk = mouseEvent->button() == Qt::MiddleButton ? 0x04 : 0x02;
-                if (vkMatchesSummon(vk, m_summonKey)) {
-                    setInputMode(InputMode::Mapping);
-                }
                 return true;
             }
         }
@@ -2168,10 +2122,10 @@ void ConsolePage::setGameMode(bool enabled) {
             setInputMode(InputMode::Mapping);
         }
         if (m_mode == InputMode::Mapping) {
-            const QString action = m_summonMode == SummonMode::Hold ? QStringLiteral("按住")
-                                                                    : QStringLiteral("长按");
-            showHud(QStringLiteral("%1 %2 呼出鼠标 · F11 退出全屏")
-                        .arg(action, vkName(m_summonKey)));
+            showHud(m_summonMode == SummonMode::Hold
+                        ? QStringLiteral("按住 %1 呼出鼠标 · F11 退出全屏").arg(vkName(m_summonKey))
+                        : QStringLiteral("按 %1 切换鼠标模式 · F11 退出全屏")
+                              .arg(vkName(m_summonKey)));
         }
     } else {
         // 窗口默认鼠标模式（S5）。

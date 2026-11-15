@@ -371,6 +371,13 @@ QSpinBox:focus, QDoubleSpinBox:focus {
     border-color: @color-brand-primary;
 }
 
+/* 紧凑输入框：键位编辑里的鼠标灵敏度 / X / Y */
+QSpinBox[variant="compact"], QDoubleSpinBox[variant="compact"] {
+    min-height: 20px;
+    padding: 0 4px;
+    font-size: @font-text-caption;
+}
+
 /* ------------------------------- 滑杆 ------------------------------- */
 QSlider::groove:horizontal {
     height: 4px;

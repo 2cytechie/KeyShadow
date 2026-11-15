@@ -36,8 +36,8 @@ class ConsolePage : public QWidget {
 public:
     /// 输入三态：空闲 / 映射 / 指针 / 键位编辑，互斥切换。
     enum class InputMode { Idle, Mapping, Pointer, Edit };
-    /// 呼出方式：长按 300ms 呼出 / 按住呼出、松开返回。
-    enum class SummonMode { LongPress, Hold };
+    /// 呼出方式：切换（按一次呼出，再按一次返回）/ 按住（按住呼出、松开返回）。
+    enum class SummonMode { Toggle, Hold };
 
     explicit ConsolePage(Session *session, QWidget *parent = nullptr);
     ~ConsolePage() override;
@@ -209,7 +209,6 @@ private:
 
     QTimer *m_hudTimer = nullptr;
     QTimer *m_summonHintTimer = nullptr;
-    QTimer *m_summonHoldTimer = nullptr;
     QTimer *m_keyCaptureTimer = nullptr;
 
     InputMode m_mode = InputMode::Idle;
@@ -217,11 +216,9 @@ private:
     bool m_gameMode = false;
     bool m_draggingTouch = false;
     QPoint m_lastTouchPos;
-    bool m_summonHeld = false;
     bool m_summonHintShown = false;
-    SummonMode m_summonMode = SummonMode::LongPress;
+    SummonMode m_summonMode = SummonMode::Toggle;
     int m_summonKey = 0x12; ///< VK_MENU
-    int m_summonHoldMs = 300;
 
     Profile m_keymapProfile;
     int m_keymapSelected = -1;

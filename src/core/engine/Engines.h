@@ -286,7 +286,7 @@ public:
     void tick(int dtMs, const std::function<void(const QByteArray &)> &send);
     void releaseAll(const std::function<void(const QByteArray &)> &send);
 
-    /// 呼出键不参与键位映射（长按呼出时避免同时触发游戏动作）。
+    /// 呼出键不参与键位映射（避免同时触发游戏动作）。
     void setIgnoredKey(int vk) { m_ignoredKey = vk; }
     int ignoredKey() const { return m_ignoredKey; }
 

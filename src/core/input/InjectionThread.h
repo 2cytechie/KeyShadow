@@ -47,6 +47,8 @@ public:
     /// 清空「已抬起但物理仍按住」的按键集合。
     void clearSuspendedKeys() { m_clearSuspended.store(true); }
     void sendMessage(const QByteArray &message);
+    /// 直操输入消息：携带 GUI 线程采集时刻（QPC），用于窗口态输入延迟统计。
+    void sendInputMessage(const QByteArray &message, qint64 qpcTimestamp);
     void releaseAll();
 
     void beginCalibration();
@@ -71,7 +73,12 @@ private:
 
     mutable std::mutex m_mutex;
     QVector<InputEvent> m_events;
-    QVector<QByteArray> m_outbox;
+    /// 出站消息：qpc 为 0 表示非输入消息（不计延迟）。
+    struct OutgoingMessage {
+        QByteArray data;
+        qint64 qpc = 0;
+    };
+    QVector<OutgoingMessage> m_outbox;
     Profile m_pendingProfile;
     bool m_profileDirty = false;
     int m_pendingScreenWidth = 0;

@@ -147,7 +147,7 @@ QPushButton[variant="primary"] {
     background: #00D9B8;
     border: 1px solid #00D9B8;
     color: #04211D;
-    min-height: 40px;
+    min-height: 28px;
     font-weight: 600;
 }
 
@@ -218,7 +218,7 @@ QPushButton[role="option"] {
     border: 1px solid #333D4A;
     border-radius: 6px;
     color: #9BA7B4;
-    padding: 0 12px;
+    padding: 0 10px;
 }
 
 QPushButton[role="option"]:hover {
@@ -369,6 +369,47 @@ QSpinBox, QDoubleSpinBox {
 
 QSpinBox:focus, QDoubleSpinBox:focus {
     border-color: #00D9B8;
+}
+
+/* 紧凑输入框：键位编辑里的鼠标灵敏度 / X / Y */
+QSpinBox[variant="compact"], QDoubleSpinBox[variant="compact"] {
+    min-height: 20px;
+    padding: 0 4px;
+    font-size: 12px;
+}
+
+QSpinBox[variant="compact"]::up-button,
+QSpinBox[variant="compact"]::down-button,
+QDoubleSpinBox[variant="compact"]::up-button,
+QDoubleSpinBox[variant="compact"]::down-button {
+    subcontrol-origin: border;
+    width: 14px;
+    border: none;
+    background: transparent;
+}
+
+QSpinBox[variant="compact"]::up-button,
+QDoubleSpinBox[variant="compact"]::up-button {
+    subcontrol-position: top right;
+}
+
+QSpinBox[variant="compact"]::down-button,
+QDoubleSpinBox[variant="compact"]::down-button {
+    subcontrol-position: bottom right;
+}
+
+QSpinBox[variant="compact"]::up-arrow,
+QDoubleSpinBox[variant="compact"]::up-arrow {
+    image: url(:/icons/spin-up.svg);
+    width: 8px;
+    height: 5px;
+}
+
+QSpinBox[variant="compact"]::down-arrow,
+QDoubleSpinBox[variant="compact"]::down-arrow {
+    image: url(:/icons/spin-down.svg);
+    width: 8px;
+    height: 5px;
 }
 
 /* ------------------------------- 滑杆 ------------------------------- */

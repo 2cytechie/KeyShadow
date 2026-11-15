@@ -106,6 +106,8 @@ public:
     qint64 pollCalibratedCounts();
 
     void sendControlMessage(const QByteArray &message);
+    /// 直操输入消息：带 GUI 采集时刻（QPC），用于窗口态输入延迟统计。
+    void sendInputMessage(const QByteArray &message, qint64 qpcTimestamp);
     void releaseAllTouches();
 
     /// 返回统计快照（流线程会并发更新分辨率/编码信息）。
@@ -195,6 +197,8 @@ private:
     QTimer m_statsTimer;
     std::atomic<qint64> m_byteCounter{0};
     qint64 m_lastStatsTickMs = 0;
+    /// 输入延迟按事件采样：无新输入时保留上次读数一段时间，避免窗口态读数一闪而过。
+    double m_latencyHoldSeconds = 0.0;
     std::atomic<double> m_decodeAccumMs{0.0};
     std::atomic<qint64> m_decodeSamples{0};
     QTimer m_reconnectTimer;

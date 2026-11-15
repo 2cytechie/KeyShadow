@@ -125,19 +125,19 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
 
     m_summonButton = new QPushButton(summonRow);
     m_summonButton->setProperty("role", "summonKey");
-    m_summonButton->setFixedSize(120, 34);
+    m_summonButton->setFixedSize(120, 36);
     m_summonButton->setFont(Theme::monoFont(12));
     m_summonButton->setCursor(Qt::PointingHandCursor);
     summonLayout->addWidget(m_summonButton);
 
-    m_summonModeLongPress = new QPushButton(QStringLiteral("长按 300ms 呼出"), summonRow);
-    m_summonModeHold = new QPushButton(QStringLiteral("按下呼出 · 抬起返回"), summonRow);
+    m_summonModeToggle = new QPushButton(QStringLiteral("切换"), summonRow);
+    m_summonModeHold = new QPushButton(QStringLiteral("按住"), summonRow);
     m_summonModeGroup = new QButtonGroup(this);
     m_summonModeGroup->setExclusive(true);
-    for (QPushButton *button : {m_summonModeLongPress, m_summonModeHold}) {
+    for (QPushButton *button : {m_summonModeToggle, m_summonModeHold}) {
         button->setCheckable(true);
         button->setProperty("role", "option");
-        button->setFixedHeight(34);
+        button->setFixedHeight(36);
         button->setCursor(Qt::PointingHandCursor);
         m_summonModeGroup->addButton(button);
         summonLayout->addWidget(button);
@@ -158,7 +158,7 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
 
     m_sprintButton = new QPushButton(sprintRow);
     m_sprintButton->setProperty("role", "summonKey");
-    m_sprintButton->setFixedSize(120, 34);
+    m_sprintButton->setFixedSize(120, 36);
     m_sprintButton->setFont(Theme::monoFont(12));
     m_sprintButton->setCursor(Qt::PointingHandCursor);
     sprintLayout->addWidget(m_sprintButton);
@@ -170,7 +170,7 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     for (QPushButton *button : {m_sprintModeSwitch, m_sprintModeHold}) {
         button->setCheckable(true);
         button->setProperty("role", "option");
-        button->setFixedHeight(34);
+        button->setFixedHeight(36);
         button->setCursor(Qt::PointingHandCursor);
         m_sprintModeGroup->addButton(button);
         sprintLayout->addWidget(button);
@@ -349,15 +349,15 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
     QSettings settings;
     m_summonKey = settings.value(QStringLiteral("input/summonKey"), 0x12).toInt();
     const bool holdMode =
-        settings.value(QStringLiteral("input/summonMode"), QStringLiteral("longPress"))
+        settings.value(QStringLiteral("input/summonMode"), QStringLiteral("toggle"))
             .toString() == QStringLiteral("hold");
-    (holdMode ? m_summonModeHold : m_summonModeLongPress)->setChecked(true);
-    connect(m_summonModeLongPress, &QPushButton::toggled, this, [this](bool checked) {
+    (holdMode ? m_summonModeHold : m_summonModeToggle)->setChecked(true);
+    connect(m_summonModeToggle, &QPushButton::toggled, this, [this](bool checked) {
         if (!checked || m_syncing) {
             return;
         }
-        QSettings().setValue(QStringLiteral("input/summonMode"), QStringLiteral("longPress"));
-        emit summonModeChanged(QStringLiteral("longPress"));
+        QSettings().setValue(QStringLiteral("input/summonMode"), QStringLiteral("toggle"));
+        emit summonModeChanged(QStringLiteral("toggle"));
     });
     connect(m_summonModeHold, &QPushButton::toggled, this, [this](bool checked) {
         if (!checked || m_syncing) {
@@ -404,7 +404,7 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
 }
 
 void SettingsPage::refreshListenButtons() {
-    const QString listeningText = QStringLiteral("请按下新按键…（Esc 取消）");
+    const QString listeningText = QStringLiteral("新按键");
     if (m_summonButton) {
         const bool listening = m_listening && m_listenTarget == ListenTarget::Summon;
         m_summonButton->setText(listening ? listeningText : vkName(m_summonKey));

@@ -65,7 +65,7 @@ private:
     QLabel *m_humanizerStatus = nullptr;
     QLabel *m_licenseLabel = nullptr;
     QPushButton *m_summonButton = nullptr;
-    QPushButton *m_summonModeLongPress = nullptr;
+    QPushButton *m_summonModeToggle = nullptr;
     QPushButton *m_summonModeHold = nullptr;
     QButtonGroup *m_summonModeGroup = nullptr;
     QLabel *m_summonStatus = nullptr;

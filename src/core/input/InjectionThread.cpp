@@ -109,7 +109,12 @@ void InjectionThread::setSprint(bool active) {
 
 void InjectionThread::sendMessage(const QByteArray &message) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_outbox.append(message);
+    m_outbox.append({message, 0});
+}
+
+void InjectionThread::sendInputMessage(const QByteArray &message, qint64 qpcTimestamp) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_outbox.append({message, qpcTimestamp});
 }
 
 void InjectionThread::releaseAll() {
@@ -167,7 +172,7 @@ void InjectionThread::loop() {
     timeBeginPeriod(1);
 
     QVector<InputEvent> events;
-    QVector<QByteArray> outbox;
+    QVector<OutgoingMessage> outbox;
     Profile profile;
     bool hasProfile = false;
     int screenWidth = m_screenWidth;
@@ -252,10 +257,20 @@ void InjectionThread::loop() {
             m_engine.setIgnoredKey(ignoredKey);
         }
 
-        for (const QByteArray &message : outbox) {
-            send(message);
+        double batchLatencyMs = -1.0;
+        for (const OutgoingMessage &outgoing : outbox) {
+            send(outgoing.data);
+            if (outgoing.qpc > 0) {
+                // 窗口态直操：从 GUI 采集到写入控制 socket 的耗时，与映射态口径一致。
+                // 一批消息取最旧一条（最大）延迟，避免突发鼠标拖动时读数偏乐观。
+                batchLatencyMs = std::max(
+                    batchLatencyMs, (qpcNowTicks() - outgoing.qpc) * 1000.0 / qpcFrequencyHz());
+            }
         }
         outbox.clear();
+        if (batchLatencyMs >= 0.0) {
+            m_latencyMs.store(batchLatencyMs);
+        }
 
         for (const InputEvent &event : events) {
             m_engine.handleInput(event);
