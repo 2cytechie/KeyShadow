@@ -1,5 +1,6 @@
 #include "core/input/InjectionThread.h"
 
+#include "core/scrcpy/Protocol.h"
 #include "core/video/VideoFrame.h"
 
 #include <winsock2.h>
@@ -15,6 +16,14 @@ namespace {
 
 constexpr int kTickHz = 240;
 constexpr double kTickSeconds = 1.0 / kTickHz;
+
+/// 大端 32 位读取（触点封包坐标字段）。
+int readBe32(const QByteArray &data, int offset) {
+    return (static_cast<int>(static_cast<quint8>(data.at(offset))) << 24) |
+           (static_cast<int>(static_cast<quint8>(data.at(offset + 1))) << 16) |
+           (static_cast<int>(static_cast<quint8>(data.at(offset + 2))) << 8) |
+           static_cast<int>(static_cast<quint8>(data.at(offset + 3)));
+}
 
 qint64 qpcNow() {
     LARGE_INTEGER value;
@@ -45,6 +54,7 @@ bool InjectionThread::start(quintptr controlSocket, int screenWidth, int screenH
     m_socket = controlSocket;
     m_screenWidth = std::max(1, screenWidth);
     m_screenHeight = std::max(1, screenHeight);
+    m_traceStartQpc = qpcNow();
     m_engine.setScreenSize(m_screenWidth, m_screenHeight);
     m_stopRequested.store(false);
     m_thread = std::thread([this] { loop(); });
@@ -144,6 +154,55 @@ qint64 InjectionThread::takeCalibratedCounts() {
 
 double InjectionThread::takeLatencyMs() { return m_latencyMs.exchange(-1.0); }
 
+void InjectionThread::setTouchTraceEnabled(bool enabled) {
+    m_traceEnabled.store(enabled);
+    if (!enabled) {
+        std::lock_guard<std::mutex> lock(m_traceMutex);
+        m_trace.clear();
+        m_lookDebug = LookDebugState{};
+    }
+}
+
+QVector<TouchTraceEntry> InjectionThread::takeTouchTrace() {
+    std::lock_guard<std::mutex> lock(m_traceMutex);
+    QVector<TouchTraceEntry> trace;
+    trace.swap(m_trace);
+    return trace;
+}
+
+LookDebugState InjectionThread::lookDebug() const {
+    std::lock_guard<std::mutex> lock(m_traceMutex);
+    return m_lookDebug;
+}
+
+void InjectionThread::recordTouch(const QByteArray &message) {
+    if (!m_traceEnabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+    // InjectTouch 封包：类型(1) 动作(1) pointer(8) x(4) y(4) 宽(2) 高(2) 压力(2) 按钮(8)
+    if (message.size() < 18 ||
+        static_cast<quint8>(message.at(0)) != static_cast<quint8>(proto::MsgType::InjectTouch)) {
+        return;
+    }
+    TouchTraceEntry entry;
+    entry.atMs = static_cast<qint64>((qpcNow() - m_traceStartQpc) * 1000.0 / qpcFrequency());
+    entry.action = static_cast<int>(static_cast<quint8>(message.at(1)));
+    quint64 pointer = 0;
+    for (int i = 2; i < 10; ++i) {
+        pointer = (pointer << 8) | static_cast<quint8>(message.at(i));
+    }
+    entry.pointerId = static_cast<int>(pointer);
+    entry.x = readBe32(message, 10);
+    entry.y = readBe32(message, 14);
+
+    std::lock_guard<std::mutex> lock(m_traceMutex);
+    // UI 每 33ms 拉取一次，240Hz 注入下 2048 条足够回溯数秒；超限丢最旧的一半。
+    if (m_trace.size() >= 2048) {
+        m_trace.remove(0, m_trace.size() - 1024);
+    }
+    m_trace.append(entry);
+}
+
 InjectionThread::Stats InjectionThread::stats() const {
     Stats stats;
     stats.latencyMs = m_latencyMs.load();
@@ -187,6 +246,7 @@ void InjectionThread::loop() {
 
     auto send = [this](const QByteArray &message) {
         if (!message.isEmpty()) {
+            recordTouch(message);
             sendAll(message.constData(), message.size());
         }
     };
@@ -296,6 +356,12 @@ void InjectionThread::loop() {
         if (accumulator >= kTickSeconds) {
             m_engine.tick(dtMs, send);
             accumulator = 0.0;
+
+            if (m_traceEnabled.load(std::memory_order_relaxed)) {
+                const LookDebugState lookState = m_engine.look().debugState();
+                std::lock_guard<std::mutex> lock(m_traceMutex);
+                m_lookDebug = lookState;
+            }
 
             const double latency = m_engine.takeLatencyMs();
             if (latency >= 0.0) {

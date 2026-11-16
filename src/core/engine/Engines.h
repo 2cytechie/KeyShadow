@@ -163,6 +163,24 @@ private:
 // ---------------------------------------------------------------------------
 // 视角（lift-recenter 无限转向）
 // ---------------------------------------------------------------------------
+/// 视角引擎调试快照：仅用于画布可视化排查「视角突然转向」，不参与注入逻辑。
+struct LookDebugState {
+    bool active = false;
+    bool recentering = false;
+    int recenterDelayMs = 0;
+    double baseX = 0.0;   ///< 本轮抖动后的触发区中心（设备像素）
+    double baseY = 0.0;
+    double fingerX = 0.0; ///< 当前模拟手指位置（设备像素）
+    double fingerY = 0.0;
+    double radiusX = 0.0; ///< 触发区椭圆半径（设备像素）
+    double radiusY = 0.0;
+    double pendingX = 0.0; ///< 回中后待消费的位移（设备像素）
+    double pendingY = 0.0;
+    double accumX = 0.0;  ///< 尚未消费的鼠标累计位移（计数）
+    double accumY = 0.0;
+    double countsPer180 = 0.0;
+};
+
 class LookEngine {
 public:
     void addDelta(int dx, int dy, qint64 timestampNs);
@@ -170,6 +188,7 @@ public:
     /// 若视角触点仍按下则先发送抬触，再清除状态。
     void release(const std::function<void(const QByteArray &)> &send);
     bool isActive() const { return m_active; }
+    LookDebugState debugState() const;
 
     bool tick(int dtMs, const std::function<void(const QByteArray &)> &send);
 

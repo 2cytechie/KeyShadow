@@ -293,6 +293,25 @@ void LookEngine::reset() {
     m_pendingY = 0.0;
 }
 
+LookDebugState LookEngine::debugState() const {
+    LookDebugState state;
+    state.active = m_active;
+    state.recentering = m_recentering;
+    state.recenterDelayMs = m_recenterDelayMs;
+    state.baseX = m_basePixel.x();
+    state.baseY = m_basePixel.y();
+    state.fingerX = m_fingerPixel.x();
+    state.fingerY = m_fingerPixel.y();
+    state.radiusX = m_radius * m_screenWidth;
+    state.radiusY = m_radius * m_screenHeight;
+    state.pendingX = m_pendingX;
+    state.pendingY = m_pendingY;
+    state.accumX = m_accumX;
+    state.accumY = m_accumY;
+    state.countsPer180 = m_countsPer180;
+    return state;
+}
+
 void LookEngine::release(const std::function<void(const QByteArray &)> &send) {
     if (m_active) {
         emitTouch(send, static_cast<int>(proto::TouchAction::Up),

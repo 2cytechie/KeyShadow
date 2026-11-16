@@ -4,6 +4,7 @@
 #include <QWidget>
 
 #include "core/engine/Engines.h"
+#include "core/input/InjectionThread.h"
 
 class QComboBox;
 class QDoubleSpinBox;
@@ -88,6 +89,9 @@ private:
     void buildStatusBar(QVBoxLayout *rootLayout);
     void layoutVideoOverlays();
     void updateStatsOverlay();
+    /// 触点可视化（临时调试）：拉取注入轨迹并刷新叠加层；F9 切换开关。
+    void refreshTouchTrace();
+    void toggleTouchTrace();
 
     void refreshProfileToUi();
     void refreshQualityToUi();
@@ -160,9 +164,16 @@ private:
     // 视频区
     VideoWidget *m_video = nullptr;
     KeymapOverlay *m_overlay = nullptr;
+    QWidget *m_touchTraceWidget = nullptr; ///< 触点可视化叠加层（实际类型 TouchTraceWidget）
     QLabel *m_hud = nullptr;
     QLabel *m_summonHint = nullptr;
     QLabel *m_statsOverlay = nullptr;
+
+    // 触点可视化（临时调试）
+    QTimer *m_touchTraceTimer = nullptr;
+    QVector<TouchTraceEntry> m_touchHistory;
+    LookDebugState m_lookDebug;
+    bool m_touchTraceEnabled = true;
 
     // 检查器
     QFrame *m_inspector = nullptr;

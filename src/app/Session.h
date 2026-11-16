@@ -110,6 +110,11 @@ public:
     void sendInputMessage(const QByteArray &message, qint64 qpcTimestamp);
     void releaseAllTouches();
 
+    /// 触点调试可视化（临时排查「视角突然转向」）：开启记录、拉取出站触点与视角引擎快照。
+    void setTouchTraceEnabled(bool enabled);
+    QVector<TouchTraceEntry> takeTouchTrace();
+    LookDebugState lookDebugState() const;
+
     /// 返回统计快照（流线程会并发更新分辨率/编码信息）。
     Stats stats() const;
 

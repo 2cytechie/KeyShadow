@@ -11,6 +11,15 @@
 
 namespace ks {
 
+/// 触点调试跟踪：注入线程记录的每条发往设备的触点事件（临时排查「视角突然转向」）。
+struct TouchTraceEntry {
+    qint64 atMs = 0; ///< 相对注入线程启动的毫秒数
+    int action = 0;  ///< proto::TouchAction
+    int pointerId = 0;
+    int x = 0;
+    int y = 0;
+};
+
 /// 240Hz 高精度触控注入线程：消费输入事件 → 引擎合成 → 控制通道发送。
 /// 使用 QPC 计时 + timeBeginPeriod(1)，与 scrcpy 控制协议解耦。
 class InjectionThread {
@@ -57,9 +66,15 @@ public:
     double takeLatencyMs();
     Stats stats() const;
 
+    /// 触点调试可视化：开启后记录出站触点事件并导出视角引擎快照。
+    void setTouchTraceEnabled(bool enabled);
+    QVector<TouchTraceEntry> takeTouchTrace();
+    LookDebugState lookDebug() const;
+
 private:
     void loop();
     bool sendAll(const char *data, int size);
+    void recordTouch(const QByteArray &message);
 
     InputEngine m_engine;
     std::thread m_thread;
@@ -94,6 +109,13 @@ private:
     int m_screenHeight = 2400;
     std::atomic<quint64> m_messagesSent{0};
     std::atomic<double> m_latencyMs{-1.0};
+
+    // 触点调试可视化（临时排查视角突然转向）
+    std::atomic<bool> m_traceEnabled{false};
+    mutable std::mutex m_traceMutex;
+    QVector<TouchTraceEntry> m_trace;
+    LookDebugState m_lookDebug;
+    qint64 m_traceStartQpc = 0;
 };
 
 } // namespace ks
