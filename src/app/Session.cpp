@@ -670,12 +670,6 @@ void Session::sendInputMessage(const QByteArray &message, qint64 qpcTimestamp) {
 
 void Session::releaseAllTouches() { m_injection.releaseAll(); }
 
-void Session::setTouchTraceEnabled(bool enabled) { m_injection.setTouchTraceEnabled(enabled); }
-
-QVector<TouchTraceEntry> Session::takeTouchTrace() { return m_injection.takeTouchTrace(); }
-
-LookDebugState Session::lookDebugState() const { return m_injection.lookDebug(); }
-
 void Session::startAudio() {
     QString error;
     if (!m_audioPlayer.start(&error)) {

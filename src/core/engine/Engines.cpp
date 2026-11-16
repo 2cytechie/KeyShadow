@@ -293,25 +293,6 @@ void LookEngine::reset() {
     m_pendingY = 0.0;
 }
 
-LookDebugState LookEngine::debugState() const {
-    LookDebugState state;
-    state.active = m_active;
-    state.recentering = m_recentering;
-    state.recenterDelayMs = m_recenterDelayMs;
-    state.baseX = m_basePixel.x();
-    state.baseY = m_basePixel.y();
-    state.fingerX = m_fingerPixel.x();
-    state.fingerY = m_fingerPixel.y();
-    state.radiusX = m_radius * m_screenWidth;
-    state.radiusY = m_radius * m_screenHeight;
-    state.pendingX = m_pendingX;
-    state.pendingY = m_pendingY;
-    state.accumX = m_accumX;
-    state.accumY = m_accumY;
-    state.countsPer180 = m_countsPer180;
-    return state;
-}
-
 void LookEngine::release(const std::function<void(const QByteArray &)> &send) {
     if (m_active) {
         emitTouch(send, static_cast<int>(proto::TouchAction::Up),
@@ -396,7 +377,16 @@ bool LookEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &s
         }
     }
 
-    const QPointF step = delta * stepFactor;
+    QPointF step = delta * stepFactor;
+    // 单帧步长上限：快速甩动后 pending 可能接近整个触发区半径，回中后一帧全发出去，
+    // 手机端会把这条超长 Move 当成触点瞬移（视角突然转向）。限制步长后剩余位移
+    // 留在 pending 里分多帧平滑走完，转向总量不变，只是速度曲线不再跳变。
+    const double maxStepPx = std::max(1.0, std::min(radiusX, radiusY) * 0.15);
+    const double stepLength = std::hypot(step.x(), step.y());
+    if (stepLength > maxStepPx) {
+        step *= maxStepPx / stepLength;
+    }
+
     if (std::abs(step.x()) >= 0.01 || std::abs(step.y()) >= 0.01) {
         m_fingerPixel += step;
         emitTouch(send, static_cast<int>(proto::TouchAction::Move),
@@ -406,12 +396,17 @@ bool LookEngine::tick(int dtMs, const std::function<void(const QByteArray &)> &s
 
     remainingX -= step.x();
     remainingY -= step.y();
+    const bool atBoundary = stepFactor < 1.0 - 1e-9;
     if (std::abs(remainingX) > 0.01 || std::abs(remainingY) > 0.01) {
-        emitTouch(send, static_cast<int>(proto::TouchAction::Up),
-                  static_cast<int>(std::lround(m_fingerPixel.x())),
-                  static_cast<int>(std::lround(m_fingerPixel.y())));
-        m_recentering = true;
-        m_recenterDelayMs = kRecenterGapMs;
+        if (atBoundary) {
+            // 真正滑到边界：抬起后回中，剩余位移留到新一圈继续消费。
+            emitTouch(send, static_cast<int>(proto::TouchAction::Up),
+                      static_cast<int>(std::lround(m_fingerPixel.x())),
+                      static_cast<int>(std::lround(m_fingerPixel.y())));
+            m_recentering = true;
+            m_recenterDelayMs = kRecenterGapMs;
+        }
+        // 未到边界（仅被单帧步长截断）：保持触点按住，下一帧继续。
         m_pendingX = remainingX;
         m_pendingY = remainingY;
     }

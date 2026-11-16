@@ -21,9 +21,7 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFontMetrics>
 #include <QFrame>
-#include <QHash>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -31,8 +29,6 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMouseEvent>
-#include <QPainter>
-#include <QPolygonF>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScreen>
@@ -81,195 +77,6 @@ QPushButton *makeToolButton(QWidget *parent, const QString &text, const char *va
     }
     return button;
 }
-
-QColor pointerColor(int pointerId) {
-    switch (pointerId) {
-    case 0: return QColor(0, 217, 184);    // 摇杆
-    case 1: return QColor(96, 176, 255);   // 视角
-    case 10: return QColor(255, 96, 208);  // 画布直操
-    default: return QColor(255, 196, 64);  // 键位 / 滚轮
-    }
-}
-
-/// 触点可视化叠加层（临时调试）：把注入到手机的每个触点、视角轨迹与跳变画在画面上。
-class TouchTraceWidget : public QWidget {
-public:
-    explicit TouchTraceWidget(QWidget *parent) : QWidget(parent) {
-        setAttribute(Qt::WA_TransparentForMouseEvents);
-        setAttribute(Qt::WA_TranslucentBackground);
-        setAttribute(Qt::WA_NoSystemBackground);
-        setAutoFillBackground(false);
-        setFocusPolicy(Qt::NoFocus);
-    }
-
-    void setData(const QVector<ks::TouchTraceEntry> &history, const ks::LookDebugState &look,
-                 int deviceWidth, int deviceHeight) {
-        m_history = history;
-        m_look = look;
-        m_deviceWidth = std::max(1, deviceWidth);
-        m_deviceHeight = std::max(1, deviceHeight);
-        update();
-    }
-
-protected:
-    void paintEvent(QPaintEvent *) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-
-        const double sx = width() / static_cast<double>(m_deviceWidth);
-        const double sy = height() / static_cast<double>(m_deviceHeight);
-
-        struct Trail {
-            QVector<QPointF> points; ///< 设备像素坐标
-            int lastAction = 0;
-        };
-        QHash<int, Trail> trails;
-
-        bool hasLastUp = false;
-        QPointF lastUp;
-        double recenterPx = -1.0;
-        QPointF jumpFrom;
-        QPointF jumpTo;
-        double jumpPx = 0.0;
-        // 相邻两条 Move 跳变超过屏幕短边 6% 时标红：突然转向多由这种跳变造成。
-        const double jumpThreshold =
-            std::max(24.0, std::min(m_deviceWidth, m_deviceHeight) * 0.06);
-
-        for (const ks::TouchTraceEntry &entry : m_history) {
-            Trail &trail = trails[entry.pointerId];
-            const QPointF pt(entry.x, entry.y);
-            const bool down = entry.action == 0;
-            const bool up = entry.action == 1 || entry.action == 3;
-            if (down) {
-                trail.points.clear();
-                trail.points.append(pt);
-                if (entry.pointerId == 1 && hasLastUp) {
-                    recenterPx = QLineF(lastUp, pt).length();
-                    hasLastUp = false;
-                }
-            } else if (up) {
-                trail.points.append(pt);
-                if (entry.pointerId == 1) {
-                    lastUp = pt;
-                    hasLastUp = true;
-                }
-            } else {
-                if (!trail.points.isEmpty()) {
-                    const QPointF prev = trail.points.last();
-                    const double distance = QLineF(prev, pt).length();
-                    if (distance > jumpThreshold && distance > jumpPx) {
-                        jumpPx = distance;
-                        jumpFrom = prev;
-                        jumpTo = pt;
-                    }
-                }
-                trail.points.append(pt);
-                if (trail.points.size() > 48) {
-                    trail.points.remove(0, trail.points.size() - 48);
-                }
-            }
-            trail.lastAction = entry.action;
-        }
-
-        // 视角触发区：抖动后的本轮中心 + 椭圆边界
-        if (m_look.active || m_look.recentering) {
-            const QPointF base(m_look.baseX * sx, m_look.baseY * sy);
-            painter.setBrush(Qt::NoBrush);
-            painter.setPen(QPen(QColor(96, 176, 255, 80), 1, Qt::DotLine));
-            painter.drawEllipse(base, m_look.radiusX * sx, m_look.radiusY * sy);
-            painter.setPen(QPen(QColor(96, 176, 255, 220), 1));
-            painter.drawLine(base + QPointF(-5, 0), base + QPointF(5, 0));
-            painter.drawLine(base + QPointF(0, -5), base + QPointF(0, 5));
-        }
-
-        // 视角触点轨迹
-        const auto lookTrail = trails.constFind(1);
-        if (lookTrail != trails.constEnd() && lookTrail->points.size() >= 2) {
-            QPolygonF polyline;
-            for (const QPointF &pt : lookTrail->points) {
-                polyline << QPointF(pt.x() * sx, pt.y() * sy);
-            }
-            QColor color = pointerColor(1);
-            color.setAlpha(160);
-            painter.setPen(QPen(color, 2));
-            painter.setBrush(Qt::NoBrush);
-            painter.drawPolyline(polyline);
-        }
-
-        // 跳变连线 + 红圈
-        if (jumpPx > 0.0) {
-            const QPointF from(jumpFrom.x() * sx, jumpFrom.y() * sy);
-            const QPointF to(jumpTo.x() * sx, jumpTo.y() * sy);
-            painter.setBrush(Qt::NoBrush);
-            painter.setPen(QPen(QColor(255, 72, 72, 210), 2, Qt::DashLine));
-            painter.drawLine(from, to);
-            painter.setPen(QPen(QColor(255, 72, 72, 240), 1.5));
-            painter.drawEllipse(to, 14, 14);
-        }
-
-        // 当前按下的触点
-        int aliveCount = 0;
-        for (auto it = trails.cbegin(); it != trails.cend(); ++it) {
-            if (it->points.isEmpty()) {
-                continue;
-            }
-            if (it->lastAction != 0 && it->lastAction != 2) {
-                continue;
-            }
-            ++aliveCount;
-            const QPointF pt = it->points.last();
-            const QPointF widgetPt(pt.x() * sx, pt.y() * sy);
-            QColor fill = pointerColor(it.key());
-            fill.setAlpha(215);
-            painter.setBrush(fill);
-            painter.setPen(QPen(QColor(0, 0, 0, 150), 1));
-            painter.drawEllipse(widgetPt, 9, 9);
-            painter.setPen(QColor(0, 0, 0, 220));
-            painter.setFont(Theme::uiFont(9, QFont::Bold));
-            painter.drawText(QRectF(widgetPt.x() - 9, widgetPt.y() - 9, 18, 18), Qt::AlignCenter,
-                             QString::number(it.key()));
-        }
-
-        // 底部信息条
-        QStringList lines;
-        if (m_look.recentering) {
-            lines << QStringLiteral("视角 回中等待 %1ms").arg(m_look.recenterDelayMs);
-        } else if (m_look.active) {
-            lines << QStringLiteral("视角 按住 finger(%1,%2) base(%3,%4)")
-                         .arg(std::lround(m_look.fingerX))
-                         .arg(std::lround(m_look.fingerY))
-                         .arg(std::lround(m_look.baseX))
-                         .arg(std::lround(m_look.baseY));
-        } else {
-            lines << QStringLiteral("视角 空闲");
-        }
-        lines << QStringLiteral("回中位移 %1px")
-                     .arg(recenterPx >= 0.0 ? QString::number(std::lround(recenterPx))
-                                            : QStringLiteral("--"));
-        lines << QStringLiteral("最大跳变 %1px")
-                     .arg(jumpPx > 0.0 ? QString::number(std::lround(jumpPx))
-                                       : QStringLiteral("--"));
-        lines << QStringLiteral("触点 %1").arg(aliveCount);
-        const QString text = lines.join(QStringLiteral("  |  "));
-
-        const QFont font = Theme::monoFont(10);
-        painter.setFont(font);
-        const QFontMetrics metrics(font);
-        const int textWidth = metrics.horizontalAdvance(text);
-        const QRectF box((width() - textWidth) / 2.0 - 10, height() - 34, textWidth + 20, 24);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(8, 10, 13, 160));
-        painter.drawRoundedRect(box, 4, 4);
-        painter.setPen(QColor(232, 237, 242, 225));
-        painter.drawText(box, Qt::AlignCenter, text);
-    }
-
-private:
-    QVector<ks::TouchTraceEntry> m_history;
-    ks::LookDebugState m_look;
-    int m_deviceWidth = 1;
-    int m_deviceHeight = 1;
-};
 
 } // namespace
 
@@ -593,14 +400,6 @@ void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
             exitKeymapEdit(false);
         }
     });
-
-    // 触点可视化叠加层（临时调试，F9 开关）：先于 HUD/状态信息创建，保证它们显示在上层。
-    m_touchTraceWidget = new TouchTraceWidget(m_video);
-    m_touchTraceWidget->hide();
-    m_touchTraceTimer = new QTimer(this);
-    m_touchTraceTimer->setInterval(33);
-    connect(m_touchTraceTimer, &QTimer::timeout, this, &ConsolePage::refreshTouchTrace);
-    m_touchTraceTimer->start();
 
     m_hud = new QLabel(m_video);
     m_hud->setStyleSheet(QStringLiteral(
@@ -1052,9 +851,6 @@ void ConsolePage::layoutVideoOverlays() {
     }
     if (m_overlay) {
         m_overlay->setGeometry(m_video->videoRect());
-    }
-    if (m_touchTraceWidget) {
-        m_touchTraceWidget->setGeometry(m_video->videoRect());
     }
     const QRect videoRect = m_video->videoRect();
     const QRect anchor = videoRect.isEmpty() ? m_video->rect() : videoRect;
@@ -2218,14 +2014,6 @@ bool ConsolePage::eventFilter(QObject *watched, QEvent *event) {
     }
 
     if (watched == m_video) {
-        if (event->type() == QEvent::KeyPress) {
-            // F9 切换触点可视化（临时调试，排查视角突然转向）。
-            auto *keyEvent = static_cast<QKeyEvent *>(event);
-            if (keyEvent->key() == Qt::Key_F9 && !keyEvent->isAutoRepeat()) {
-                toggleTouchTrace();
-                return true;
-            }
-        }
         if (event->type() == QEvent::Resize) {
             layoutVideoOverlays();
         } else if (event->type() == QEvent::Wheel) {
@@ -2374,71 +2162,6 @@ void ConsolePage::updateStatsOverlay() {
         m_statsOverlay->raise();
         layoutVideoOverlays();
     }
-}
-
-void ConsolePage::refreshTouchTrace() {
-    if (!m_session || !m_touchTraceWidget) {
-        return;
-    }
-    const bool show = m_touchTraceEnabled && m_active &&
-                      m_session->state() == Session::State::Streaming &&
-                      m_mode != InputMode::Edit;
-    // 与显示同步开关：不可见时停止注入线程记录，避免积攒几秒前的旧轨迹。
-    m_session->setTouchTraceEnabled(show);
-    if (!show) {
-        if (m_touchTraceWidget->isVisible()) {
-            m_touchTraceWidget->hide();
-        }
-        m_touchHistory.clear();
-        return;
-    }
-
-    const QVector<TouchTraceEntry> chunk = m_session->takeTouchTrace();
-    if (!chunk.isEmpty()) {
-        m_touchHistory += chunk;
-    }
-    // 只保留最近 1.5 秒：足以看清一次突然转向前后的触点动作。
-    if (!m_touchHistory.isEmpty()) {
-        const qint64 newestMs = m_touchHistory.last().atMs;
-        int drop = 0;
-        while (drop < m_touchHistory.size() &&
-               newestMs - m_touchHistory.at(drop).atMs > 1500) {
-            ++drop;
-        }
-        if (drop > 0) {
-            m_touchHistory.remove(0, drop);
-        }
-    }
-
-    m_lookDebug = m_session->lookDebugState();
-    const QSize device = deviceSize();
-    auto *widget = static_cast<TouchTraceWidget *>(m_touchTraceWidget);
-    widget->setGeometry(m_video->videoRect());
-    widget->setData(m_touchHistory, m_lookDebug, device.width(), device.height());
-    if (!widget->isVisible()) {
-        widget->show();
-        widget->raise();
-        // raise 会盖住 HUD/状态信息，重新置顶它们。
-        if (m_hud->isVisible()) m_hud->raise();
-        if (m_summonHint->isVisible()) m_summonHint->raise();
-        if (m_statsOverlay->isVisible()) m_statsOverlay->raise();
-    }
-}
-
-void ConsolePage::toggleTouchTrace() {
-    m_touchTraceEnabled = !m_touchTraceEnabled;
-    if (!m_touchTraceEnabled) {
-        m_touchHistory.clear();
-        if (m_touchTraceWidget) {
-            m_touchTraceWidget->hide();
-        }
-        if (m_session) {
-            m_session->setTouchTraceEnabled(false);
-        }
-    }
-    showHud(m_touchTraceEnabled ? QStringLiteral("触点可视化：开（F9 关闭）")
-                                : QStringLiteral("触点可视化：关（F9 打开）"));
-    refreshTouchTrace();
 }
 
 void ConsolePage::setBypassEnhance(bool bypass) { m_video->setBypassEnhance(bypass); }
