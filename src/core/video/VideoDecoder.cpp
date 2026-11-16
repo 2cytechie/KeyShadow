@@ -96,9 +96,7 @@ VideoDecoder::~VideoDecoder() { close(); }
 bool VideoDecoder::open(quint32 codecTag, QString *error) {
     close();
 
-    // 未设置时默认开启；KEYSHADOW_DEFER_READBACK=0 可强制走旧路径（A/B 与应急回退）。
-    m_deferReadback = !qEnvironmentVariableIsSet("KEYSHADOW_DEFER_READBACK") ||
-                      qEnvironmentVariableIntValue("KEYSHADOW_DEFER_READBACK") != 0;
+    m_deferReadback = true;
     m_deferFailed = false;
     m_gpuFailed = false;
 
@@ -122,11 +120,8 @@ bool VideoDecoder::open(quint32 codecTag, QString *error) {
     }
 
     // 1) 先尝试 D3D11VA 硬解
-    const bool forceSoftware = qEnvironmentVariableIntValue("KEYSHADOW_FORCE_SW_DECODE") == 1;
-    if (!forceSoftware) {
-        av_hwdevice_ctx_create(&m_hwDeviceCtx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
-    }
-    if (!forceSoftware && m_hwDeviceCtx) {
+    av_hwdevice_ctx_create(&m_hwDeviceCtx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
+    if (m_hwDeviceCtx) {
         AVCodecContext *hwCtx = avcodec_alloc_context3(codec);
         if (hwCtx) {
             hwCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;

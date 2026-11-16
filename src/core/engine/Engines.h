@@ -107,6 +107,8 @@ public:
     int firstMoveDelayMs();
     /// 区域中心抖动（像素）：±6% 半径，每轴独立均匀；关闭时返回 0。
     int regionJitter(double radiusPx);
+    /// 摇杆力度抖动倍数（±1.5%）：只改变推进距离，不改变方向。
+    double strengthJitter();
 
 private:
     bool m_enabled = true;
@@ -124,7 +126,7 @@ public:
     void reset();
     /// 若触点仍按下则先发送抬触，再清除状态（模式切换/断线时使用）。
     void release(const std::function<void(const QByteArray &)> &send);
-    /// 注入拟人化抖动：每次激活时对区域中心做随机偏移。
+    /// 注入拟人化：每次激活时随机化推进力度，方向保持与按键完全一致。
     void setHumanizer(HumanizerEngine *humanizer) { m_humanizer = humanizer; }
 
     /// 疾跑：开启后轮盘触点可滑到大圆（sprintRadius）边缘。
@@ -146,7 +148,8 @@ private:
     int m_screenWidth = 1920;
     int m_screenHeight = 1080;
     HumanizerEngine *m_humanizer = nullptr;
-    QPointF m_basePixel; ///< 本次激活的抖动后中心
+    QPointF m_basePixel; ///< 本次激活的摇杆中心（固定，不能偏移，否则方向会偏）
+    double m_strengthScale = 1.0; ///< 本次激活的力度随机倍数
 
     bool m_up = false;
     bool m_down = false;

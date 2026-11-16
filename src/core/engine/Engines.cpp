@@ -21,17 +21,6 @@ constexpr quint64 kMaxPointer = 9;
 constexpr int kRecenterGapMs = 10;
 
 /// 区域中心抖动：每次按下/回中时在 ±(半径比例) 内随机偏移，并钳制在屏幕内。
-QPointF jitteredCenter(HumanizerEngine *humanizer, const QPointF &centerPx, double radiusPx,
-                       int screenWidth, int screenHeight) {
-    if (!humanizer) {
-        return centerPx;
-    }
-    const QPointF shifted(centerPx.x() + humanizer->regionJitter(radiusPx),
-                          centerPx.y() + humanizer->regionJitter(radiusPx));
-    return QPointF(std::clamp(shifted.x(), 0.0, std::max(0, screenWidth - 1) * 1.0),
-                   std::clamp(shifted.y(), 0.0, std::max(0, screenHeight - 1) * 1.0));
-}
-
 QPointF jitteredLookCenter(HumanizerEngine *humanizer, const QPointF &centerPx,
                            double radiusX, double radiusY, int screenWidth, int screenHeight) {
     const double jitterRadius = std::min(radiusX, radiusY);
@@ -149,6 +138,15 @@ int HumanizerEngine::regionJitter(double radiusPx) {
     return dist(m_rng);
 }
 
+double HumanizerEngine::strengthJitter() {
+    if (!m_enabled) {
+        return 1.0;
+    }
+    // 97%~100%：触点只沿按键方向缩短，方向不变；满推不会被上界钳制掉抖动。
+    std::uniform_real_distribution<double> dist(0.97, 1.0);
+    return dist(m_rng);
+}
+
 int HumanizerEngine::firstMoveDelayMs() {
     if (!m_enabled) {
         return 0;
@@ -221,15 +219,17 @@ bool JoystickEngine::tick(int dtMs, const std::function<void(const QByteArray &)
         if (!m_active) {
             m_active = true;
             m_releasing = false;
-            // 每次激活对区域中心做拟人化抖动，避免触点长期固定在同一像素。
-            m_basePixel = jitteredCenter(m_humanizer, centerPx, radiusPx, m_screenWidth,
-                                         m_screenHeight);
+            // 手机游戏按触点相对摇杆中心的方向判定移动方向：中心必须固定在配置位置，
+            // 拟人化只随机化力度。中心一旦偏移，按住 W 会变成偏向前侧，斜向更明显。
+            m_basePixel = centerPx;
+            m_strengthScale = m_humanizer ? m_humanizer->strengthJitter() : 1.0;
             m_currentPixel = m_basePixel;
             send(touchMessage(kJoystickPointer, proto::TouchAction::Down, m_basePixel,
                               m_screenWidth, m_screenHeight));
         }
 
-        const QPointF target = m_basePixel + QPointF(fx * radiusPx * t, fy * radiusPx * t);
+        const double push = std::clamp(t * m_strengthScale, 0.0, 1.0);
+        const QPointF target = m_basePixel + QPointF(fx * radiusPx * push, fy * radiusPx * push);
         const QPointF delta = target - m_currentPixel;
         if (std::abs(delta.x()) >= 0.5 || std::abs(delta.y()) >= 0.5) {
             m_currentPixel = target;

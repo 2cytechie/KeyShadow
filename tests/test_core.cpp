@@ -729,7 +729,29 @@ void testRegionJitter() {
         joystick.tick(16, sink);
         collectDown(&points);
     }
-    check(points.size() > 1, "joystick center jitter varies across activations");
+    check(points.size() == 1, "joystick center stays fixed across activations");
+    check(!points.empty() && points.begin()->first == 216 && points.begin()->second == 1920,
+          "joystick center matches configured point even with the humanizer enabled");
+
+    joystick.reset();
+    joystick.setKeys(true, false, false, false);
+    messages.clear();
+    joystick.tick(16, sink);
+    check(messages.size() >= 2 && static_cast<quint8>(messages.at(1).at(1)) == 2 &&
+              static_cast<int>(read32(messages.at(1), 10)) == 216,
+          "holding W moves straight up with no lateral drift");
+
+    joystick.reset();
+    joystick.setKeys(true, false, true, false);
+    messages.clear();
+    joystick.tick(16, sink);
+    const int diagonalDx = messages.size() >= 2
+                               ? static_cast<int>(read32(messages.at(1), 10)) - 216 : 0;
+    const int diagonalDy = messages.size() >= 2
+                               ? static_cast<int>(read32(messages.at(1), 14)) - 1920 : 0;
+    check(messages.size() >= 2 && diagonalDx < -60 && diagonalDy < -60 &&
+              std::abs(diagonalDx - diagonalDy) <= 1,
+          "diagonal WA keeps an exact 45 degree direction");
 
     humanizer.setEnabled(false);
     points.clear();

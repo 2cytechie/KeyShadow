@@ -33,9 +33,6 @@ public:
     /// 移除本机授权（删除 license.json 并清理历史残留）。
     void deactivate();
 
-    /// 开发调试开关（仅在 debug 构建生效）。
-    void setDevUnlocked(bool unlocked);
-
 private:
     LicenseManager();
 
@@ -44,7 +41,6 @@ private:
     void storeLastSeen(qint64 seconds) const;
 
     bool m_valid = false;
-    bool m_devUnlocked = false;
     LicensePayload m_payload;
     QString m_fingerprint;
     QString m_lastError;

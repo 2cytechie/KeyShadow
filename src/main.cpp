@@ -5,7 +5,6 @@
 #include <QIcon>
 #include <QStandardPaths>
 #include <QSurfaceFormat>
-#include <QTimer>
 
 #include <cstdio>
 #include <cstdlib>
@@ -16,7 +15,6 @@
 #include <dbghelp.h>
 
 #include "app/Session.h"
-#include "license/LicenseManager.h"
 #include "ui/MainWindow.h"
 #include "ui/Theme.h"
 #include "ui/VideoPresentationSettings.h"
@@ -148,31 +146,9 @@ int main(int argc, char *argv[]) {
 
     ks::ui::Theme::apply(app);
 
-    // 开发期便捷开关：KEYSHADOW_DEV_PRO=1 时临时解锁 Pro 能力（仅调试用）。
-    if (qEnvironmentVariableIntValue("KEYSHADOW_DEV_PRO") == 1) {
-        ks::LicenseManager::instance().setDevUnlocked(true);
-    }
-
     ks::Session session;
     ks::ui::MainWindow window(&session);
     window.show();
-
-    // 开发期联调：KEYSHADOW_AUTO_CONNECT=1（或设备序列号）启动后自动连接，便于无需手动点击验证。
-    const QString autoConnect = qEnvironmentVariable("KEYSHADOW_AUTO_CONNECT");
-    if (!autoConnect.isEmpty()) {
-        QTimer::singleShot(1200, &window, [&session, autoConnect] {
-            QString serial = autoConnect;
-            if (serial == QStringLiteral("1")) {
-                session.refreshDevices();
-                const auto devices = session.devices();
-                if (devices.isEmpty()) {
-                    return;
-                }
-                serial = devices.first().serial;
-            }
-            session.connectDevice(serial);
-        });
-    }
 
     return app.exec();
 }

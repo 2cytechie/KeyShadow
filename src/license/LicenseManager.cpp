@@ -73,11 +73,6 @@ void LicenseManager::storeLastSeen(qint64 seconds) const {
 }
 
 bool LicenseManager::isPro() const {
-#ifdef QT_DEBUG
-    if (m_devUnlocked) {
-        return true;
-    }
-#endif
     return m_valid;
 }
 
@@ -198,7 +193,5 @@ void LicenseManager::deactivate() {
     settings.remove(QStringLiteral("license/code"));
     settings.remove(QString::fromLatin1(kLastSeenKey));
 }
-
-void LicenseManager::setDevUnlocked(bool unlocked) { m_devUnlocked = unlocked; }
 
 } // namespace ks

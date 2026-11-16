@@ -263,37 +263,11 @@ void MainWindow::buildPages(QWidget *body, QHBoxLayout *layout) {
 
     m_console->setSummonKey(m_session->summonKey());
 
-    // 开发期联调：KEYSHADOW_AUTO_KEYMAP_EDIT=1 在自动连接后进入键位编辑，便于截图验证。
-    if (qEnvironmentVariableIntValue("KEYSHADOW_AUTO_KEYMAP_EDIT") == 1) {
-        auto *autoEditTimer = new QTimer(this);
-        autoEditTimer->setSingleShot(true);
-        autoEditTimer->setInterval(4000);
-        connect(autoEditTimer, &QTimer::timeout, this, [this] {
-            if (m_console && m_console->isVisible()) {
-                m_console->beginKeymapEdit();
-            }
-        });
-        connect(m_session, &Session::stateChanged, this,
-                [autoEditTimer](Session::State state, const QString &) {
-                    if (state == Session::State::Streaming) {
-                        autoEditTimer->start();
-                    }
-                });
-    }
-
     if (m_navGroup->button(0)) {
         m_navGroup->button(0)->setChecked(true);
     }
     m_pages->setCurrentIndex(0);
     m_currentPage = 0;
-
-    // 开发期联调：KEYSHADOW_AUTO_PAGE=settings 时直接打开指定页面（便于截图验证）。
-    const QString autoPage = qEnvironmentVariable("KEYSHADOW_AUTO_PAGE");
-    if (autoPage == QStringLiteral("settings")) {
-        navigateTo(2);
-    } else if (autoPage == QStringLiteral("device")) {
-        navigateTo(0);
-    }
 }
 
 void MainWindow::navigateTo(int index) {

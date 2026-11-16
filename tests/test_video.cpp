@@ -2,7 +2,6 @@
 #include "ui/VideoWidget.h"
 #include "ui/VideoPresentationSettings.h"
 #include "app/Session.h"
-#include "license/LicenseManager.h"
 #include <QSettings>
 #include <QTemporaryDir>
 
@@ -83,7 +82,6 @@ std::vector<Packet> makeStream(bool hevc = false) {
 }
 
 void testDecodeCount(const std::vector<Packet> &packets, quint32 codec = 0x68323634u) {
-    qputenv("KEYSHADOW_FORCE_SW_DECODE", "1");
     ks::VideoDecoder decoder;
     QString error;
     check(decoder.open(codec, &error), "software video decoder opens");
@@ -100,7 +98,6 @@ void testDecodeCount(const std::vector<Packet> &packets, quint32 codec = 0x68323
     check(decoder.takeDecodedFrames() == 0, "interval counter resets without double counting");
     decoder.flush([](const ks::VideoFramePtr &) {});
     check(decoder.takeDecodedFrames() == 0, "flush never invents duplicate decoded frames");
-    qunsetenv("KEYSHADOW_FORCE_SW_DECODE");
 }
 
 ks::VideoFramePtr colorFrame(bool fullRange) {
@@ -318,22 +315,6 @@ void testVideoPreferences() {
         session.setHumanizerEnabled(true);
         check(!session.screenOff() && !session.humanizerEnabled(),
               "basic paid-feature enforcement also applies outside the UI");
-#ifndef NDEBUG
-        auto &license=ks::LicenseManager::instance();
-        license.setDevUnlocked(true);
-        ks::Profile pro=session.profile();
-        pro.videoShortEdge=0; pro.maxFps=120;
-        session.applyProfile(pro,false);
-        session.setScreenOff(true); session.setHumanizerEnabled(true);
-        check(session.profile().videoShortEdge==0 && session.profile().maxFps==120 &&
-              session.screenOff() && session.humanizerEnabled(),
-              "Pro allows native 120 fps and opt-in paid switches");
-        license.setDevUnlocked(false);
-        session.refreshLicense();
-        check(session.profile().videoShortEdge==1080 && session.profile().maxFps==60 &&
-              !session.screenOff() && !session.humanizerEnabled(),
-              "removing Pro reclaims video limits and paid switches");
-#endif
     }
     {
         ks::Session restored(nullptr, directory.path()+"/profiles");
@@ -351,17 +332,15 @@ int testDeviceSession(QApplication &app, const QString &serial, const QString &m
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
     QSettings().setValue(QStringLiteral("video/audioEnabled"), false);
-    const bool expectFallback = mode == QStringLiteral("h265-fallback");
-    if (expectFallback) qputenv("KEYSHADOW_FORCE_SW_DECODE", "1");
+    const bool useHevc = mode == QStringLiteral("h265");
     ks::Session session(nullptr, directory.filePath("profiles"));
     auto profile = session.profile();
     profile.videoShortEdge = 1080;
     profile.maxFps = 60; // basic-license integration test; never bypass paid gates
     profile.videoBitRate = 32'000'000;
     session.applyProfile(profile, false);
-    session.setQualityPriority(mode != QStringLiteral("h264"));
-    session.setQualityCodec(mode == QStringLiteral("h264") ? QStringLiteral("h264")
-                                                           : QStringLiteral("h265"));
+    session.setQualityPriority(useHevc);
+    session.setQualityCodec(useHevc ? QStringLiteral("h265") : QStringLiteral("h264"));
     ks::ui::VideoWidget widget;
     widget.setAttribute(Qt::WA_DontShowOnScreen);
     widget.resize(1920, 1080);
@@ -378,7 +357,6 @@ int testDeviceSession(QApplication &app, const QString &serial, const QString &m
                      &session, &ks::Session::disableGpuFrames);
     QObject::connect(&session, &ks::Session::videoOptionsChanged, &app, [&] {
         fallback |= session.codecFallbackActive();
-        if (session.codecFallbackActive()) qunsetenv("KEYSHADOW_FORCE_SW_DECODE");
         std::printf("[device notice] %s\n", qPrintable(session.videoNotice()));
         std::fflush(stdout);
     });
@@ -397,10 +375,7 @@ int testDeviceSession(QApplication &app, const QString &serial, const QString &m
         check(session.profile().videoShortEdge == 1080 && session.profile().maxFps == 60 &&
               session.profile().videoBitRate == 32'000'000,
               "real-device mode/codec selection retains every selected source parameter");
-        if (expectFallback)
-            check(fallback && h264Seen && !session.videoNotice().isEmpty(),
-                  "HEVC software-only failure falls back to H264 with a visible reason");
-        else if (mode == QStringLiteral("h265"))
+        if (useHevc)
             check(hevcSeen && h264Seen && !fallback,
                   "real-device HEVC first-frame validation and a live switch to H264 both work");
         else
@@ -408,16 +383,15 @@ int testDeviceSession(QApplication &app, const QString &serial, const QString &m
         check(widget.renderStats().gpuMs >= 0.0, "real-device renderer produces GPU processing timings");
         session.disconnectDevice();
         widget.clearFrame();
-        qunsetenv("KEYSHADOW_FORCE_SW_DECODE");
         std::printf("%d checks, %d failures\n", checks, failures);
         app.exit(failures ? 1 : 0);
     });
     session.connectDevice(serial);
-    if (mode == QStringLiteral("h265")) QTimer::singleShot(6000, &app, [&] {
+    if (useHevc) QTimer::singleShot(6000, &app, [&] {
         session.setQualityPriority(false);
         widget.setQualityPriority(false);
     });
-    deadline.start(expectFallback ? 20000 : 12000);
+    deadline.start(12000);
     return app.exec();
 }
 } // namespace

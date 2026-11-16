@@ -257,8 +257,7 @@ void Session::startConnection(const QString &serial, bool resetCodecFallback) {
         setVideoNotice(m_streamHevc.load()
             ? QStringLiteral("H.265 试播中：正在验证设备编码与本机硬解，失败将回退 H.264。")
             : QStringLiteral("H.264 低延迟路径"));
-    m_videoDecoder.setGpuFramesEnabled(
-        qEnvironmentVariableIntValue("KEYSHADOW_DISABLE_GPU_SHARING") != 1);
+    m_videoDecoder.setGpuFramesEnabled(true);
     config.audio = m_audioEnabled;
 
     if (config.serverJarPath.isEmpty()) {
