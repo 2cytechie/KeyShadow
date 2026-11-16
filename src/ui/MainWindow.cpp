@@ -193,7 +193,7 @@ void MainWindow::buildSidebar(QWidget *body, QHBoxLayout *layout) {
     divider->setObjectName(QStringLiteral("Divider"));
     column->addWidget(divider);
 
-    auto *version = new QLabel(QStringLiteral("v0.1.0"), m_sidebar);
+    auto *version = new QLabel(QStringLiteral("v26.11.16"), m_sidebar);
     version->setProperty("variant", "micro");
     column->addWidget(version);
 

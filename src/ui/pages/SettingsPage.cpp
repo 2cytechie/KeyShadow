@@ -205,7 +205,7 @@ SettingsPage::SettingsPage(Session *session, QWidget *parent) : QWidget(parent),
 
     // 关于
     QWidget *aboutSection = buildSection(QStringLiteral("关于"));
-    auto *version = new QLabel(QStringLiteral("键影 KeyShadow v0.1.0"), aboutSection);
+    auto *version = new QLabel(QStringLiteral("键影 KeyShadow v26.11.16"), aboutSection);
     addRow(aboutSection, QStringLiteral("版本"), version);
 
     auto *server = new QLabel(

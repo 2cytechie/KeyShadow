@@ -54,7 +54,7 @@ DevicePage::DevicePage(Session *session, QWidget *parent) : QWidget(parent), m_s
     mark->setPixmap(IconFactory::appIcon(26));
     auto *brand = new QLabel(QStringLiteral("键影 KeyShadow"), card);
     brand->setObjectName(QStringLiteral("BrandName"));
-    auto *version = new QLabel(QStringLiteral("v0.1.0"), card);
+    auto *version = new QLabel(QStringLiteral("v26.11.16"), card);
     version->setProperty("variant", "micro");
     brandRow->addWidget(mark);
     brandRow->addSpacing(6);

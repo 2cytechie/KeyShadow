@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("KeyShadow"));
     QApplication::setOrganizationName(QStringLiteral("KeyShadow"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QStringLiteral("26.11.16"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/app-icon.ico")));
 
     ks::ui::Theme::apply(app);

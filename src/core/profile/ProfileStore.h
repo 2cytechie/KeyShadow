@@ -24,9 +24,9 @@ public:
     /// 从 JSON 文件读取方案；不自动保存，由调用方决定是否写入。
     bool importFromFile(const QString &path, Profile *profile, QString *error = nullptr) const;
 
-    /// 内置默认方案（和平精英键位基线）。
+    /// 内置默认方案
     static Profile makeDefaultProfile();
-    static QString defaultProfileName() { return QStringLiteral("和平精英-默认"); }
+    static QString defaultProfileName() { return QStringLiteral("默认方案"); }
     static QString sanitizeFileName(const QString &name);
 
 private:
