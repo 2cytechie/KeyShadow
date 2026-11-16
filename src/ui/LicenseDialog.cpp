@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QDesktopServices>
 #include <QFile>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -14,6 +15,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QStyle>
+#include <QUrl>
 #include <QVBoxLayout>
 
 namespace ks::ui {
@@ -65,6 +67,10 @@ LicenseDialog::LicenseDialog(QWidget *parent) : QDialog(parent) {
     layout->addWidget(m_pasteEdit, 1);
 
     auto *bottomRow = new QHBoxLayout();
+    // 左下角：购买入口，打开系统默认浏览器。
+    auto *purchaseButton = new QPushButton(QStringLiteral("购买永久会员"), this);
+    purchaseButton->setProperty("variant", "primary");
+    bottomRow->addWidget(purchaseButton);
     bottomRow->addStretch(1);
     m_importPasteButton = new QPushButton(QStringLiteral("导入粘贴内容"), this);
     auto *closeButton = new QPushButton(QStringLiteral("关闭"), this);
@@ -75,6 +81,10 @@ LicenseDialog::LicenseDialog(QWidget *parent) : QDialog(parent) {
     connect(copyButton, &QPushButton::clicked, this, [this] {
         QApplication::clipboard()->setText(m_fingerprintEdit->text());
         setStatusText(QStringLiteral("已复制本机指纹，可发送给卖家"), QStringLiteral("success"));
+    });
+    connect(purchaseButton, &QPushButton::clicked, this, [] {
+        QDesktopServices::openUrl(
+            QUrl(QStringLiteral("https://www.goofish.com/item?id=1098545515862")));
     });
     connect(m_importFileButton, &QPushButton::clicked, this, &LicenseDialog::importFromFile);
     connect(m_importPasteButton, &QPushButton::clicked, this, &LicenseDialog::importFromPastedText);
