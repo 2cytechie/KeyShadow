@@ -403,7 +403,8 @@ void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
 
     m_hud = new QLabel(m_video);
     m_hud->setStyleSheet(QStringLiteral(
-        "background: rgba(8,10,13,0.62); color: #E8EDF2; padding: 4px 10px; border-radius: 4px;"));
+        "background: rgba(8,10,13,0.50); color: rgba(232,237,242,0.85); padding: 4px 10px;"
+        " border-radius: 4px;"));
     m_hud->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_hud->hide();
 
@@ -416,7 +417,8 @@ void ConsolePage::buildVideoArea(QHBoxLayout *centerLayout) {
     // 全屏信息悬浮（码率 / 帧率 / 延迟，顶部居中，设置统一开关）
     m_statsOverlay = new QLabel(m_video);
     m_statsOverlay->setStyleSheet(QStringLiteral(
-        "background: rgba(8,10,13,0.62); color: #E8EDF2; padding: 4px 12px; border-radius: 4px;"));
+        "background: rgba(8,10,13,0.50); color: rgba(232,237,242,0.85); padding: 4px 12px;"
+        " border-radius: 4px;"));
     m_statsOverlay->setFont(Theme::monoFont(13));
     m_statsOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_statsOverlay->setText(QStringLiteral("-- FPS · -- Mbps · -- ms"));
@@ -1025,11 +1027,8 @@ void ConsolePage::updateStatsUi() {
         const QString latency = stats.inputLatencyMs >= 0
                                     ? QString::number(stats.inputLatencyMs, 'f', 1)
                                     : QStringLiteral("--");
-        const QString present = presentMs >= 0 ? QString::number(presentMs, 'f', 0)
-                                               : QStringLiteral("--");
-        m_statsOverlay->setText(QStringLiteral("解码 %1 FPS · %2 Mbps · 输入 %3 ms · 提交延迟 %4 ms · 缩放/增强 GPU %5 ms%6")
-                                    .arg(fps, mbps, latency, present, gpuMs,
-                                         render.degradation > 0 ? QStringLiteral(" · 性能保护") : QString()));
+        m_statsOverlay->setText(
+            QStringLiteral("解码 %1 FPS · %2 Mbps · 延迟 %3 ms").arg(fps, mbps, latency));
         m_statsOverlay->setToolTip(render.status + QLatin1Char('\n') + m_session->videoNotice());
         m_statsOverlay->adjustSize();
         layoutVideoOverlays();
